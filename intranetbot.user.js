@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.7.0
+// @version      1.9.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -36,6 +36,14 @@
     const REQUEST_TIMEOUT = 60000;   // ms per anrop innan det räknas som misslyckat
     const MAX_ATTEMPTS    = 3;       // 1 ordinarie + 2 extra försök = 3 totalt
 
+    // Inloggning till Inställningar-fliken. Endast en SHA-256-hash av
+    // "användarnamn:lösenord" lagras här, inte lösenordet i klartext.
+    // OBS: Låset körs helt i webbläsaren och är ett skydd mot att kollegor
+    // råkar ändra inställningar – inte en säker åtkomstkontroll. Den som kan
+    // redigera scriptet kan ta bort låset.
+    // Byt uppgifter: kör  printf '%s' 'anv:lösen' | sha256sum  och klistra in.
+    const SETTINGS_CRED_HASH = '6347894402e02ef1e51c58cdc25f112431ce269fe67a603c55d87f3a1587e69c';
+
     // Länk till bibliotekets inställningar i Mistral-konsolen (Inställningar-fliken).
     const LIBRARY_CONSOLE_URL = 'https://console.mistral.ai/build/libraries/01a047a2-a3ed-768a-930f-615e7aa150d6';
 
@@ -49,10 +57,25 @@
     // =========================================================================
     // KONVERSATIONS-STATE
     // =========================================================================
-    // conversation_id sparas så att agenten minns tidigare frågor i sessionen.
-    // Nollställs när sidan laddas om (in-memory) — byt till GM_setValue om du
-    // vill att historiken ska överleva sidladdningar.
+    // conversation_id och chatthistoriken sparas i sessionStorage, så att
+    // konversationen finns kvar när man klickar sig vidare på intranätet.
+    // Rensas när fliken/webbläsaren stängs.
+    const SESSION_KEY = 'sbr_assistant_session';
+    let chatHistory = [];   // [{ text, who, html }]
     let conversationId = null;
+    try {
+        const saved = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
+        if (saved) {
+            conversationId = saved.conversationId || null;
+            chatHistory = Array.isArray(saved.history) ? saved.history : [];
+        }
+    } catch (e) { /* ingen sparad session */ }
+
+    function saveSession() {
+        try {
+            sessionStorage.setItem(SESSION_KEY, JSON.stringify({ conversationId: conversationId, history: chatHistory }));
+        } catch (e) { /* lagring ej tillgänglig – historiken gäller bara denna sida */ }
+    }
     let busy = false;
 
     // Medarbetarregister för exakt, lokalt personuppslag (Väg 2). Fylls vid
@@ -264,6 +287,39 @@
         #sbr-key-status {
             font-size: 12px; color: #1a3d7c; min-height: 16px; line-height: 1.5;
         }
+
+        /* Inloggning (Inställningar) */
+        #sbr-settings-login { padding: 18px; display: flex; flex-direction: column; gap: 8px; }
+        #sbr-settings-login .sbr-btn { margin-top: 8px; }
+        #sbr-login-status { font-size: 12px; color: #b00020; min-height: 16px; line-height: 1.5; }
+        #sbr-settings-content { display: none; flex-direction: column; }
+        #sbr-settings-view.unlocked #sbr-settings-login { display: none; }
+        #sbr-settings-view.unlocked #sbr-settings-content { display: flex; }
+        #sbr-settings-topbar { display: flex; align-items: center; padding: 12px 16px 0; }
+        #sbr-settings-topbar #sbr-subtabs { padding: 0; }
+        #sbr-settings-lock {
+            margin-left: auto; border: none; background: transparent; cursor: pointer;
+            font-family: ${FONT}; font-size: 12px; font-weight: 600; color: #666;
+            text-transform: uppercase; letter-spacing: .3px;
+        }
+        #sbr-settings-lock:hover { color: #000; }
+
+        /* Pratbubbla vid start */
+        #sbr-assistant-bubble {
+            position: fixed; bottom: 104px; right: 24px; z-index: 999999;
+            max-width: 240px; padding: 12px 16px;
+            background: #fff; color: #000; border: 1.5px solid #000; border-radius: 12px;
+            box-shadow: 0 6px 20px rgba(0,0,0,.25);
+            font-family: ${FONT}; font-size: 16px; font-weight: 500; line-height: 1.4;
+            cursor: pointer; opacity: 1; transition: opacity .3s ease;
+        }
+        #sbr-assistant-bubble::after {
+            content: ''; position: absolute; bottom: -9px; right: 24px;
+            width: 14px; height: 14px; background: #fff;
+            border-right: 1.5px solid #000; border-bottom: 1.5px solid #000;
+            transform: rotate(45deg);
+        }
+        #sbr-assistant-bubble.hide { opacity: 0; }
     `;
     document.head.appendChild(style);
 
@@ -299,9 +355,25 @@
             </div>
         </div>
         <div id="sbr-settings-view" class="sbr-view">
-            <div id="sbr-subtabs">
-                <button class="sbr-subtab active" data-sub="data">Data</button>
-                <button class="sbr-subtab" data-sub="api">API</button>
+            <form id="sbr-settings-login" autocomplete="off">
+                <div class="sbr-settings-section">
+                    <h3>Logga in</h3>
+                    <p>Inställningarna är låsta. Logga in som administratör för att fortsätta.</p>
+                </div>
+                <label class="sbr-field-label" for="sbr-login-user">Användarnamn</label>
+                <input type="text" id="sbr-login-user" class="sbr-input" autocomplete="off">
+                <label class="sbr-field-label" for="sbr-login-pass">Lösenord</label>
+                <input type="password" id="sbr-login-pass" class="sbr-input" autocomplete="off">
+                <button type="submit" class="sbr-btn" id="sbr-login-btn">Logga in</button>
+                <div id="sbr-login-status"></div>
+            </form>
+            <div id="sbr-settings-content">
+            <div id="sbr-settings-topbar">
+                <div id="sbr-subtabs">
+                    <button class="sbr-subtab active" data-sub="data">Data</button>
+                    <button class="sbr-subtab" data-sub="api">API</button>
+                </div>
+                <button id="sbr-settings-lock" title="Lås inställningarna">🔒 Lås</button>
             </div>
 
             <div id="sbr-sub-data" class="sbr-subview active">
@@ -342,6 +414,7 @@
                     <div id="sbr-key-status"></div>
                 </div>
             </div>
+            </div>
         </div>
     `;
     document.body.appendChild(panel);
@@ -369,6 +442,10 @@
         if (opts.html) el.innerHTML = text;
         else el.textContent = text;
         messages.appendChild(el);
+        if (!opts.thinking && !opts.noSave) {
+            chatHistory.push({ text: text, who: who, html: !!opts.html });
+            saveSession();
+        }
         messages.scrollTop = messages.scrollHeight;
         return el;
     }
@@ -472,7 +549,7 @@
                     catch (e) { reject(new Error('Kunde inte tolka svaret.')); return; }
 
                     // Spara/uppdatera konversations-ID för nästa fråga.
-                    if (data.conversation_id) conversationId = data.conversation_id;
+                    if (data.conversation_id) { conversationId = data.conversation_id; saveSession(); }
 
                     const answer = extractAnswer(data);
                     resolve(answer);
@@ -587,7 +664,54 @@
                 views[k].classList.toggle('active', k === tab.dataset.view);
             });
             if (tab.dataset.view === 'chat') input.focus();
+            if (tab.dataset.view === 'settings' && !settingsUnlocked) loginUser.focus();
         });
+    });
+
+    // =========================================================================
+    // INLOGGNING (Inställningar)
+    // =========================================================================
+    // Upplåsningen gäller bara tills sidan laddas om (in-memory).
+    let settingsUnlocked = false;
+    const settingsView = views.settings;
+    const loginForm    = panel.querySelector('#sbr-settings-login');
+    const loginUser    = panel.querySelector('#sbr-login-user');
+    const loginPass    = panel.querySelector('#sbr-login-pass');
+    const loginStatus  = panel.querySelector('#sbr-login-status');
+
+    async function sha256Hex(text) {
+        const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+        return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function setSettingsUnlocked(unlocked) {
+        settingsUnlocked = unlocked;
+        settingsView.classList.toggle('unlocked', unlocked);
+        // API-nyckeln läggs bara in i fältet när inställningarna är upplåsta.
+        keyPrimary.value = unlocked ? getActiveKey() : '';
+        keyPrimary.type = 'password';
+        keyReveal.checked = false;
+        keyStatus.textContent = '';
+        loginPass.value = '';
+        loginStatus.textContent = '';
+    }
+
+    loginForm.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        const hash = await sha256Hex(loginUser.value.trim() + ':' + loginPass.value);
+        if (hash === SETTINGS_CRED_HASH) {
+            loginUser.value = '';
+            setSettingsUnlocked(true);
+        } else {
+            loginPass.value = '';
+            loginStatus.textContent = 'Fel användarnamn eller lösenord.';
+            loginPass.focus();
+        }
+    });
+
+    panel.querySelector('#sbr-settings-lock').addEventListener('click', function () {
+        setSettingsUnlocked(false);
+        loginUser.focus();
     });
 
     // =========================================================================
@@ -616,8 +740,8 @@
     const keyReveal  = panel.querySelector('#sbr-key-reveal');
     const keyStatus  = panel.querySelector('#sbr-key-status');
 
-    // Ladda in sparad nyckel i fältet vid start.
-    keyPrimary.value = getActiveKey();
+    // Den sparade nyckeln läggs in i fältet först vid inloggning
+    // (se setSettingsUnlocked).
 
     keyReveal.addEventListener('change', function () {
         keyPrimary.type = keyReveal.checked ? 'text' : 'password';
@@ -919,11 +1043,31 @@
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     });
 
-    // Välkomsthälsning
+    // Välkomsthälsning + återställd historik från tidigare sidor i sessionen.
     addMessage(
         'Hej! Jag svarar på frågor om SBR:s policys, förmåner, regler och arbetssätt utifrån vårt intranät. Vad undrar du över?',
-        'bot'
+        'bot', { noSave: true }
     );
+    chatHistory.forEach(function (m) { addMessage(m.text, m.who, { html: m.html, noSave: true }); });
     setFace('standard', 'Redo att hjälpa till');
+
+    // Pratbubbla: visas i 3 sekunder, bara på startsidan (sbr.wiki/).
+    // Klick öppnar chatten.
+    const isStartPage = location.pathname === '/' || location.pathname === '';
+    if (isStartPage) {
+        const bubble = document.createElement('div');
+        bubble.id = 'sbr-assistant-bubble';
+        bubble.textContent = 'Hej! Vill du ha hjälp? Klicka här!';
+        document.body.appendChild(bubble);
+
+        function removeBubble() {
+            if (!bubble.isConnected) return;
+            bubble.classList.add('hide');
+            setTimeout(function () { bubble.remove(); }, 300);
+        }
+        bubble.addEventListener('click', function () { openPanel(); removeBubble(); });
+        toggle.addEventListener('click', removeBubble);
+        setTimeout(removeBubble, 3000);
+    }
 
 })();
