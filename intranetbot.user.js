@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.12.0
+// @version      1.12.1
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
+// @exclude      https://sbr.wiki/wp/wp-admin/*
+// @exclude      https://sbr.wiki/wp/wp-login.php*
 // @updateURL    https://raw.githubusercontent.com/aronzabrahamsson-cmd/intranetbot-dist/main/intranetbot.user.js
 // @downloadURL  https://raw.githubusercontent.com/aronzabrahamsson-cmd/intranetbot-dist/main/intranetbot.user.js
 // @grant        GM_xmlhttpRequest
@@ -501,9 +503,9 @@
                     <p>Logga in för att hantera data och API-nyckel.</p>
                 </div>
                 <label class="sbr-field-label" for="sbr-login-user">Användarnamn</label>
-                <input type="text" id="sbr-login-user" class="sbr-input" autocomplete="off">
+                <input type="text" id="sbr-login-user" class="sbr-input" autocomplete="off" data-lpignore="true" data-1p-ignore data-bwignore>
                 <label class="sbr-field-label" for="sbr-login-pass">Lösenord</label>
-                <input type="password" id="sbr-login-pass" class="sbr-input" autocomplete="off">
+                <input type="password" id="sbr-login-pass" class="sbr-input" autocomplete="new-password" data-lpignore="true" data-1p-ignore data-bwignore>
                 <button type="submit" class="sbr-btn" id="sbr-login-btn">Logga in</button>
                 <div id="sbr-login-status"></div>
             </form>
@@ -560,7 +562,7 @@
                         <li>Fyll bara i här om du vill använda en egen nyckel i denna webbläsare</li>
                         <li>Lämna tomt och spara för att gå tillbaka till intranätets nyckel</li>
                     </ul>
-                    <input type="password" id="sbr-key-primary" class="sbr-input" placeholder="Egen Mistral-nyckel (valfritt)" autocomplete="off">
+                    <input type="password" id="sbr-key-primary" class="sbr-input" placeholder="Egen Mistral-nyckel (valfritt)" autocomplete="new-password" data-lpignore="true" data-1p-ignore data-bwignore>
                     <div class="sbr-key-row">
                         <button class="sbr-btn" id="sbr-key-save">Spara nyckel</button>
                         <label class="sbr-key-show"><input type="checkbox" id="sbr-key-reveal"> Visa</label>
