@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.9.2
+// @version      1.10.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -44,8 +44,14 @@
     // Byt uppgifter: kör  printf '%s' 'anv:lösen' | sha256sum  och klistra in.
     const SETTINGS_CRED_HASH = '6347894402e02ef1e51c58cdc25f112431ce269fe67a603c55d87f3a1587e69c';
 
-    // Länk till bibliotekets inställningar i Mistral-konsolen (Inställningar-fliken).
-    const LIBRARY_CONSOLE_URL = 'https://console.mistral.ai/build/libraries/01a047a2-a3ed-768a-930f-615e7aa150d6';
+    // Mistral-biblioteket som agenten söker i. Inställningar → Data publicerar
+    // hit direkt via API, och datumtaggen i sidhuvudet läses härifrån.
+    const LIBRARY_ID          = '01a047a2-a3ed-768a-930f-615e7aa150d6';
+    const LIBRARY_API_URL     = 'https://api.mistral.ai/v1/libraries/' + LIBRARY_ID;
+    const LIBRARY_CONSOLE_URL = 'https://console.mistral.ai/build/libraries/' + LIBRARY_ID;
+    // Filer i biblioteket som skriptet äger och ersätter vid publicering.
+    // Andra filer i biblioteket lämnas orörda.
+    const OWN_DOC_RE          = /-(innehall|medarbetare)\.md$/i;
 
     // Bilder (base64) -> standard / arbetar / inget resultat
     const IMG = {
@@ -184,7 +190,10 @@
             font-weight: 700; font-size: 15px; color: #fff;
             letter-spacing: .3px; text-transform: uppercase;
         }
-        #sbr-assistant-header .sbr-status { font-size: 12px; color: #bdbdbd; margin-top: 3px; min-height: 15px; font-weight: 400; }
+        #sbr-assistant-header .sbr-status-row { display: flex; align-items: baseline; gap: 6px; margin-top: 3px; flex-wrap: wrap; }
+        #sbr-assistant-header .sbr-status { font-size: 12px; color: #bdbdbd; min-height: 15px; font-weight: 400; }
+        /* Datumtagg: syns bättre ju äldre biblioteket är (se renderUpdatedTag). */
+        #sbr-updated { font-size: 11px; font-weight: 400; color: #000; white-space: nowrap; }
         #sbr-assistant-close, #sbr-assistant-min {
             border: none; background: transparent; cursor: pointer;
             font-size: 22px; line-height: 1; color: #bdbdbd; padding: 4px 6px; font-family: ${FONT};
@@ -278,13 +287,43 @@
         .sbr-btn.secondary:hover { background: #f2f2f2; }
         .sbr-btn:disabled { opacity: .4; cursor: not-allowed; }
         #sbr-file-input { display: none; }
-        #sbr-convert-status {
-            font-size: 12px; color: #444; min-height: 16px; line-height: 1.5;
-            padding: 8px 10px; background: #f2f2f2; border-radius: 4px; display: none;
-            white-space: pre-line;
+        /* Flödesschema: steg-kort med pilar */
+        #sbr-sub-data { gap: 0; }
+        .sbr-step {
+            border: 1.5px solid #e6e6e6; border-radius: 10px; padding: 14px;
+            display: flex; flex-direction: column; gap: 10px; transition: opacity .2s ease, border-color .2s ease;
         }
-        #sbr-convert-status.show { display: block; }
-        .sbr-divider { height: 1px; background: #e6e6e6; border: none; margin: 0; }
+        .sbr-step.active { border-color: #000; }
+        .sbr-step.done   { border-color: #1e7d32; }
+        .sbr-step.locked { opacity: .45; }
+        .sbr-step.locked .sbr-btn, .sbr-step.locked a { pointer-events: none; }
+        .sbr-step-head { display: flex; align-items: center; gap: 10px; }
+        .sbr-step-head h3 {
+            margin: 0; font-size: 13px; font-weight: 700; text-transform: uppercase;
+            letter-spacing: .3px; color: #000;
+        }
+        .sbr-step-num {
+            flex: 0 0 24px; width: 24px; height: 24px; border-radius: 50%;
+            background: #000; color: #fff; font-size: 12px; font-weight: 700;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .sbr-step.done .sbr-step-num { background: #1e7d32; font-size: 0; }
+        .sbr-step.done .sbr-step-num::after { content: '✓'; font-size: 13px; }
+        .sbr-step-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.55; color: #444; }
+        .sbr-step-arrow { text-align: center; font-size: 18px; line-height: 1; color: #999; padding: 6px 0; }
+        .sbr-result {
+            list-style: none; margin: 0; padding: 0; font-size: 12px; line-height: 1.5;
+            color: #444; display: flex; flex-direction: column; gap: 3px;
+        }
+        .sbr-result:empty { display: none; }
+        .sbr-result li { display: flex; gap: 6px; }
+        .sbr-result .sbr-ic { flex: 0 0 16px; text-align: center; }
+        .sbr-result li.ok   .sbr-ic { color: #1e7d32; }
+        .sbr-result li.warn { color: #8a5a00; }
+        .sbr-result li.err  { color: #b00020; }
+        .sbr-result li.sub  { padding-left: 22px; }
+        .sbr-step-links { font-size: 12px; color: #666; line-height: 1.6; }
+        .sbr-step-links a { color: #1a3d7c; }
         .sbr-field-label { font-size: 12px; font-weight: 600; color: #444; margin-top: 4px; }
         .sbr-input {
             border: 1.5px solid #ccc; border-radius: 8px; padding: 9px 11px;
@@ -347,7 +386,10 @@
             <img id="sbr-assistant-face" src="${IMG.standard}" alt="">
             <div class="sbr-titles">
                 <div class="sbr-title">Intranät-assistent</div>
-                <div class="sbr-status" id="sbr-assistant-status">Redo att hjälpa till</div>
+                <div class="sbr-status-row">
+                    <div class="sbr-status" id="sbr-assistant-status">Redo att hjälpa till</div>
+                    <span id="sbr-updated"></span>
+                </div>
             </div>
             <button id="sbr-assistant-min" title="Minimera">–</button>
             <button id="sbr-assistant-close" title="Stäng">×</button>
@@ -386,28 +428,42 @@
             </div>
 
             <div id="sbr-sub-data" class="sbr-subview active">
-                <div class="sbr-settings-section">
-                    <h3>1. Hämta Wiki-data</h3>
-                    <p>Exportera intranätets innehåll som XML (WordPress-export). Öppna exportsidan, välj innehåll och ladda ner filen.</p>
-                    <a class="sbr-btn" id="sbr-export-link" href="https://sbr.wiki/wp/wp-admin/export.php" target="_blank" rel="noopener noreferrer">1. Hämta Wiki-data ↗</a>
+                <div class="sbr-step active" id="sbr-step-1">
+                    <div class="sbr-step-head"><span class="sbr-step-num">1</span><h3>Hämta wiki-data</h3></div>
+                    <ul class="sbr-step-list">
+                        <li>Öppna exportsidan</li>
+                        <li>Välj <strong>Allt innehåll</strong> → <strong>Ladda ner exportfil</strong></li>
+                    </ul>
+                    <a class="sbr-btn" id="sbr-export-link" href="https://sbr.wiki/wp/wp-admin/export.php" target="_blank" rel="noopener noreferrer">Öppna exportsidan ↗</a>
                 </div>
-                <hr class="sbr-divider">
-                <div class="sbr-settings-section">
-                    <h3>2. Konvertera</h3>
-                    <p>Släpp din nedladdade XML-fil i rutan nedan. Den konverteras till <strong>två</strong> sökvänliga .md-filer som laddas ner automatiskt: en med innehåll (policys, rutiner, nyheter) och en med medarbetare.</p>
+                <div class="sbr-step-arrow">↓</div>
+                <div class="sbr-step active" id="sbr-step-2">
+                    <div class="sbr-step-head"><span class="sbr-step-num">2</span><h3>Konvertera</h3></div>
+                    <ul class="sbr-step-list">
+                        <li>Släpp XML-filen i rutan</li>
+                        <li>Allt sker lokalt i webbläsaren</li>
+                    </ul>
                     <div id="sbr-dropzone">
                         <span>Släpp XML-fil här</span>
                         <span class="sbr-dropzone-sub">eller klicka för att välja fil</span>
                     </div>
                     <input type="file" id="sbr-file-input" accept=".xml,text/xml,application/xml">
-                    <div id="sbr-convert-status"></div>
-                    <button class="sbr-btn" id="sbr-people-download" style="display:none;">Ladda ner medarbetarfil</button>
+                    <ul class="sbr-result" id="sbr-convert-result"></ul>
                 </div>
-                <hr class="sbr-divider">
-                <div class="sbr-settings-section">
-                    <h3>3. Ladda upp till Mistral</h3>
-                    <p>Öppna biblioteket, ta bort de gamla filerna och ladda upp båda de nya .md-filerna (innehåll + medarbetare).</p>
-                    <a class="sbr-btn secondary" id="sbr-library-link" href="${LIBRARY_CONSOLE_URL}" target="_blank" rel="noopener noreferrer">Mistral Library ↗</a>
+                <div class="sbr-step-arrow">↓</div>
+                <div class="sbr-step locked" id="sbr-step-3">
+                    <div class="sbr-step-head"><span class="sbr-step-num">3</span><h3>Publicera till Mistral</h3></div>
+                    <ul class="sbr-step-list">
+                        <li>Laddar upp de nya filerna</li>
+                        <li>Tar bort de gamla när de nya är klara</li>
+                        <li>Tar oftast 1–3 minuter</li>
+                    </ul>
+                    <button class="sbr-btn" id="sbr-publish-btn" disabled>Publicera till Mistral</button>
+                    <ul class="sbr-result" id="sbr-publish-result"></ul>
+                    <div class="sbr-step-links">
+                        Ladda ner istället: <a href="#" id="sbr-dl-content">innehåll</a> · <a href="#" id="sbr-dl-people">medarbetare</a><br>
+                        <a href="${LIBRARY_CONSOLE_URL}" target="_blank" rel="noopener noreferrer">Öppna biblioteket i Mistral ↗</a>
+                    </div>
                 </div>
             </div>
 
@@ -758,6 +814,8 @@
 
     keySaveBtn.addEventListener('click', function () {
         GM_setValue('sbr_api_key_primary', keyPrimary.value.trim());
+        try { sessionStorage.removeItem(UPDATED_CACHE_KEY); } catch (e) { /* ignorera */ }
+        refreshUpdatedTag();
         keyStatus.textContent = getActiveKey()
             ? 'Sparat. Nyckeln används vid nästa fråga.'
             : 'Sparat, men fältet är tomt – lägg in en nyckel för att kunna ställa frågor.';
@@ -769,15 +827,38 @@
     // Länkar bevaras som "text (url)" så URL:erna följer med i texten.
     const dropzone      = panel.querySelector('#sbr-dropzone');
     const fileInput     = panel.querySelector('#sbr-file-input');
-    const convertStatus = panel.querySelector('#sbr-convert-status');
-    const peopleDownloadBtn = panel.querySelector('#sbr-people-download');
-    let pendingPeopleFile = null;   // { name, markdown } tills användaren klickar
+    const convertResult = panel.querySelector('#sbr-convert-result');
+    const publishResult = panel.querySelector('#sbr-publish-result');
+    const publishBtn    = panel.querySelector('#sbr-publish-btn');
+    const steps = [1, 2, 3].map(n => panel.querySelector('#sbr-step-' + n));
+    let converted = null;   // { files: [{ name, markdown }] } efter steg 2
 
     const KEEP_TYPES = ['post', 'page', 'newsitem', 'events'];
 
-    function showConvertStatus(text) {
-        convertStatus.textContent = text;
-        convertStatus.classList.add('show');
+    // Resultatlista under ett steg. rows: [{ kind: 'ok'|'warn'|'err'|'wait'|'sub', text }]
+    const RESULT_ICONS = { ok: '✓', warn: '⚠️', err: '✗', wait: '…', sub: '' };
+    function setResult(list, rows) {
+        list.innerHTML = '';
+        for (const r of rows) {
+            const li = document.createElement('li');
+            li.className = r.kind;
+            const ic = document.createElement('span');
+            ic.className = 'sbr-ic';
+            ic.textContent = RESULT_ICONS[r.kind] || '';
+            const tx = document.createElement('span');
+            tx.textContent = r.text;
+            if (r.kind !== 'sub') li.appendChild(ic);
+            li.appendChild(tx);
+            list.appendChild(li);
+        }
+    }
+    function showConvertStatus(text, kind) { setResult(convertResult, [{ kind: kind || 'wait', text: text }]); }
+
+    // Stegens läge: 'active' | 'done' | 'locked'
+    function setStep(n, state) {
+        const el = steps[n - 1];
+        el.classList.remove('active', 'done', 'locked');
+        el.classList.add(state);
     }
 
     function cleanContent(raw) {
@@ -920,11 +1001,18 @@
         const CHUNK_THRESHOLD = 6000;   // sidor större än så styckas
         const CHUNK_TARGET    = 1200;   // ungefärlig storlek per bit
 
-        function pushSection(title, link, text) {
+        // Publiceringsdatum följer med varje avsnitt så att agenten kan
+        // föredra nyare sidor framför äldre.
+        function pushSection(title, link, text, published, modified) {
             let s = '### ' + (title || '(utan titel)') + '\n';
             if (link) s += 'URL: ' + link + '\n';
+            if (published) {
+                s += 'Publicerad: ' + published;
+                if (modified && modified > published) s += ' (senast ändrad ' + modified + ')';
+                s += '\n';
+            }
             s += '\n' + text.trim() + '\n';
-            sections.push(s);
+            sections.push({ date: published || '', text: s });
         }
 
         for (const item of items) {
@@ -935,6 +1023,9 @@
             const title = childText(item, 'title');
             const link  = childText(item, 'link');
             const body  = cleanContent(childText(item, 'encoded'));
+            const validDate = d => /^\d{4}-\d{2}-\d{2}$/.test(d) && d !== '0000-00-00' ? d : '';
+            const published = validDate(childText(item, 'post_date').slice(0, 10));
+            const modified  = validDate(childText(item, 'post_modified').slice(0, 10));
 
             if (body.length < 30) { skipped++; continue; }
 
@@ -959,11 +1050,11 @@
                 let buf = '';
                 for (const p of parts) {
                     buf += p + '\n';
-                    if (buf.length > CHUNK_TARGET) { pushSection(title, link, buf); buf = ''; }
+                    if (buf.length > CHUNK_TARGET) { pushSection(title, link, buf, published, modified); buf = ''; }
                 }
-                if (buf.trim()) pushSection(title, link, buf);
+                if (buf.trim()) pushSection(title, link, buf, published, modified);
             } else {
-                pushSection(title, link, body);
+                pushSection(title, link, body, published, modified);
             }
             kept++;
         }
@@ -971,9 +1062,12 @@
         if (!kept) throw new Error('Inga publicerade sidor med innehåll hittades.');
 
         const today = new Date().toISOString().slice(0, 10);
+        // Nyast först (stabil sortering: delar av samma sida behåller ordningen).
+        sections.sort((x, y) => y.date.localeCompare(x.date));
         const contentHeader = '# SBR intranät – innehåll (policys, rutiner, nyheter)\n' +
-                       'Konverterad ' + today + '. ' + sections.length + ' avsnitt.\n\n';
-        const content = { markdown: contentHeader + sections.join('\n---\n\n') };
+                       'Konverterad ' + today + '. ' + sections.length + ' avsnitt, sorterade med nyast först.\n' +
+                       'Varje avsnitt har ett publiceringsdatum ("Publicerad:").\n\n';
+        const content = { markdown: contentHeader + sections.map(x => x.text).join('\n---\n\n') };
 
         let people = null;
         if (peopleSections.length) {
@@ -1002,7 +1096,7 @@
     function processFile(file) {
         if (!file) return;
         if (!/\.xml$/i.test(file.name) && file.type.indexOf('xml') === -1) {
-            showConvertStatus('Fel: välj en XML-fil.');
+            showConvertStatus('Välj en XML-fil.', 'err');
             return;
         }
         showConvertStatus('Läser in filen…');
@@ -1019,49 +1113,214 @@
                     peopleRecords = result.records;
                 }
 
-                const base = file.name.replace(/\.xml$/i, '');
-                const contentName = base + '-innehall.md';
-                downloadText(contentName, result.content.markdown);
+                const today = new Date().toISOString().slice(0, 10);
+                const files = [{ name: 'sbr-' + today + '-innehall.md', markdown: result.content.markdown }];
+                if (result.people) files.push({ name: 'sbr-' + today + '-medarbetare.md', markdown: result.people.markdown });
+                converted = { files: files };
 
-                let msg = 'Klart! ' + result.kept + ' sidor konverterade (' +
-                          result.skipped + ' överhoppade).\n' +
-                          '• "' + contentName + '" (innehåll) har laddats ner.';
-
-                if (result.people) {
-                    const peopleName = base + '-medarbetare.md';
-                    // Auto-nedladdning av en andra fil blockeras ofta tyst av
-                    // webbläsaren. Vi visar istället en knapp som användaren
-                    // klickar – ett klick blockeras aldrig.
-                    pendingPeopleFile = { name: peopleName, markdown: result.people.markdown };
-                    peopleDownloadBtn.textContent = 'Ladda ner medarbetarfil (' + result.peopleCount + ' medarbetare)';
-                    peopleDownloadBtn.style.display = 'block';
-                    msg += '\n• Klicka på knappen nedan för att ladda ner medarbetarfilen.';
-                } else {
-                    peopleDownloadBtn.style.display = 'none';
-                    pendingPeopleFile = null;
-                }
-                msg += '\nLadda upp BÅDA filerna i Mistral-biblioteket (steg 3).';
+                const rows = [{ kind: 'ok', text: result.kept + ' sidor konverterade (' + result.skipped + ' överhoppade)' }];
+                rows.push(result.people
+                    ? { kind: 'ok', text: result.peopleCount + ' medarbetare' }
+                    : { kind: 'warn', text: 'Ingen personallista hittades' });
                 if (result.unparsedPeople && result.unparsedPeople.length) {
-                    msg += '\n\n⚠️ ' + result.unparsedPeople.length +
-                           ' personposter kunde inte tolkas och saknas i medarbetarfilen:\n' +
-                           result.unparsedPeople.map(u => '• ' + u).join('\n');
+                    rows.push({ kind: 'warn', text: result.unparsedPeople.length + ' personposter kunde inte tolkas och saknas:' });
+                    for (const u of result.unparsedPeople) rows.push({ kind: 'sub', text: '• ' + u });
                 }
-                showConvertStatus(msg);
+                setResult(convertResult, rows);
+
+                setStep(1, 'done');
+                setStep(2, 'done');
+                setStep(3, 'active');
+                publishBtn.disabled = false;
+                setResult(publishResult, []);
+                panel.querySelector('#sbr-dl-people').style.display = result.people ? '' : 'none';
             } catch (e) {
-                showConvertStatus('Fel: ' + e.message);
+                showConvertStatus(e.message, 'err');
             }
         };
-        reader.onerror = function () { showConvertStatus('Kunde inte läsa filen.'); };
+        reader.onerror = function () { showConvertStatus('Kunde inte läsa filen.', 'err'); };
         reader.readAsText(file, 'UTF-8');
+    }
+
+    // =========================================================================
+    // PUBLICERA TILL MISTRAL (Libraries API)
+    // =========================================================================
+    // Anropar Mistral med den sparade nyckeln. body: FormData eller objekt (JSON).
+    function mistralRequest(method, url, body) {
+        return new Promise(function (resolve, reject) {
+            const headers = { 'Accept': 'application/json', 'Authorization': 'Bearer ' + getActiveKey() };
+            let data;
+            if (body instanceof FormData) data = body;
+            else if (body !== undefined) { data = JSON.stringify(body); headers['Content-Type'] = 'application/json'; }
+            GM_xmlhttpRequest({
+                method: method, url: url, headers: headers, data: data, timeout: 120000,
+                onload: function (resp) {
+                    if (resp.status < 200 || resp.status >= 300) {
+                        reject(new Error('HTTP ' + resp.status + ': ' + (resp.responseText || '').slice(0, 200)));
+                        return;
+                    }
+                    if (!resp.responseText) { resolve(null); return; }
+                    try { resolve(JSON.parse(resp.responseText)); }
+                    catch (e) { resolve(null); }
+                },
+                onerror:   function () { reject(new Error('Nätverksfel mot Mistral.')); },
+                ontimeout: function () { reject(new Error('Mistral svarade inte i tid.')); }
+            });
+        });
+    }
+
+    async function listLibraryDocs(maxPages) {
+        const all = [];
+        for (let page = 0; page < (maxPages || 20); page++) {
+            const r = await mistralRequest('GET', LIBRARY_API_URL + '/documents?page_size=100&page=' + page +
+                                                  '&sort_by=created_at&sort_order=desc');
+            const data = (r && r.data) || [];
+            all.push.apply(all, data);
+            if (!r || !r.pagination || !r.pagination.has_more || !data.length) break;
+        }
+        return all;
+    }
+
+    function uploadLibraryDoc(name, markdown) {
+        const fd = new FormData();
+        fd.append('file', new Blob([markdown], { type: 'text/markdown' }), name);
+        return mistralRequest('POST', LIBRARY_API_URL + '/documents', fd);
+    }
+
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    // Väntar tills Mistral har bearbetat dokumentet (krävs för att det ska
+    // bli sökbart). Kastar fel om bearbetningen misslyckas eller tar för lång tid.
+    async function waitUntilProcessed(docId, onTick) {
+        const started = Date.now();
+        while (Date.now() - started < 10 * 60 * 1000) {
+            const st = await mistralRequest('GET', LIBRARY_API_URL + '/documents/' + encodeURIComponent(docId) + '/status');
+            const ps = st && st.process_status;
+            if (ps === 'done' || ps === 'noop' || ps === 'self_managed') return;
+            if (ps === 'error' || ps === 'missing_content') throw new Error('Mistral kunde inte bearbeta filen (' + ps + ').');
+            if (onTick) onTick(Math.round((Date.now() - started) / 1000));
+            await sleep(4000);
+        }
+        throw new Error('Bearbetningen tog över 10 minuter. Kontrollera biblioteket i Mistral-konsolen.');
+    }
+
+    async function publishToMistral() {
+        if (!converted) return;
+        if (!getActiveKey()) {
+            setResult(publishResult, [{ kind: 'err', text: 'Ingen API-nyckel. Lägg in den under fliken API.' }]);
+            return;
+        }
+        publishBtn.disabled = true;
+        const rows = [];
+        const show = () => setResult(publishResult, rows);
+        const step = text => { const r = { kind: 'wait', text: text }; rows.push(r); show(); return r; };
+        let uploaded = [];
+        try {
+            let r = step('Läser av biblioteket…');
+            const existing = await listLibraryDocs();
+            const oldOwn = existing.filter(d => OWN_DOC_RE.test(d.name || ''));
+            const others = existing.filter(d => !OWN_DOC_RE.test(d.name || ''));
+            r.kind = 'ok'; r.text = 'Biblioteket har ' + existing.length + ' filer (' + oldOwn.length + ' ersätts)';
+
+            for (const f of converted.files) {
+                r = step('Laddar upp ' + f.name + '…');
+                const doc = await uploadLibraryDoc(f.name, f.markdown);
+                if (!doc || !doc.id) throw new Error('Mistral returnerade inget dokument-ID.');
+                uploaded.push(doc);
+                r.kind = 'ok'; r.text = 'Uppladdad: ' + f.name;
+            }
+            show();
+
+            r = step('Mistral bearbetar filerna…');
+            for (const doc of uploaded) {
+                await waitUntilProcessed(doc.id, secs => { r.text = 'Mistral bearbetar filerna… (' + secs + ' s)'; show(); });
+            }
+            r.kind = 'ok'; r.text = 'Filerna är bearbetade och sökbara';
+
+            const newIds = uploaded.map(d => d.id);
+            const toDelete = oldOwn.filter(d => newIds.indexOf(d.id) === -1);
+            if (toDelete.length) {
+                r = step('Tar bort gamla filer…');
+                for (const d of toDelete) {
+                    await mistralRequest('DELETE', LIBRARY_API_URL + '/documents/' + encodeURIComponent(d.id));
+                }
+                r.kind = 'ok'; r.text = toDelete.length + ' gamla filer borttagna';
+            }
+            if (others.length) {
+                rows.push({ kind: 'warn', text: 'Lämnades orörda (andra filer i biblioteket):' });
+                for (const d of others) rows.push({ kind: 'sub', text: '• ' + d.name });
+            }
+            rows.push({ kind: 'ok', text: 'Klart! Agenten använder nu de nya filerna.' });
+            show();
+            setStep(3, 'done');
+            try { sessionStorage.removeItem(UPDATED_CACHE_KEY); } catch (e) { /* ignorera */ }
+            refreshUpdatedTag();
+        } catch (e) {
+            const last = rows[rows.length - 1];
+            if (last && last.kind === 'wait') last.kind = 'err';
+            rows.push({ kind: 'err', text: e.message });
+            rows.push({ kind: 'sub', text: uploaded.length
+                ? 'De gamla filerna ligger kvar. Kontrollera biblioteket innan du försöker igen.'
+                : 'Inget har ändrats i biblioteket.' });
+            show();
+            publishBtn.disabled = false;
+        }
+    }
+
+    publishBtn.addEventListener('click', publishToMistral);
+
+    // Manuell reserv: ladda ner filerna och ladda upp dem i konsolen.
+    function downloadConverted(kind) {
+        const f = converted && converted.files.find(x => x.name.indexOf('-' + kind + '.md') !== -1);
+        if (f) downloadText(f.name, f.markdown);
+    }
+    panel.querySelector('#sbr-dl-content').addEventListener('click', e => { e.preventDefault(); downloadConverted('innehall'); });
+    panel.querySelector('#sbr-dl-people').addEventListener('click', e => { e.preventDefault(); downloadConverted('medarbetare'); });
+
+    // =========================================================================
+    // DATUMTAGG ("uppdaterad …") I SIDHUVUDET
+    // =========================================================================
+    // Datumet hämtas från biblioteket (senast uppladdade fil), så alla som
+    // använder skriptet ser samma datum. Texten är svart (osynlig mot det
+    // svarta sidhuvudet) de första 3 veckorna och blir sedan allt ljusare.
+    const updatedTag = panel.querySelector('#sbr-updated');
+    const UPDATED_CACHE_KEY = 'sbr_library_updated';
+    const UPDATED_CACHE_MS  = 30 * 60 * 1000;
+
+    function updatedTagColor(ageDays) {
+        if (ageDays < 21) return '#000';      // vecka 1–3: svart
+        if (ageDays < 28) return '#555';      // vecka 4: mörkgrå
+        if (ageDays < 35) return '#bbb';      // vecka 5: ljusgrå
+        return '#fff';                        // därefter: vit
+    }
+
+    function renderUpdatedTag(iso) {
+        const d = iso ? new Date(iso) : null;
+        if (!d || isNaN(d)) { updatedTag.textContent = ''; return; }
+        const ageDays = (Date.now() - d.getTime()) / 86400000;
+        updatedTag.textContent = '(uppdaterad ' +
+            d.toLocaleDateString('sv-SE', { day: 'numeric', month: 'long', year: 'numeric' }) + ')';
+        updatedTag.style.color = updatedTagColor(ageDays);
+    }
+
+    async function refreshUpdatedTag() {
+        try {
+            const cached = JSON.parse(sessionStorage.getItem(UPDATED_CACHE_KEY) || 'null');
+            if (cached && Date.now() - cached.fetched < UPDATED_CACHE_MS) { renderUpdatedTag(cached.at); return; }
+        } catch (e) { /* ingen cache */ }
+        if (!getActiveKey()) return;
+        try {
+            const docs = await listLibraryDocs(1);   // nyast först
+            const own = docs.find(d => OWN_DOC_RE.test(d.name || '')) || docs[0];
+            const at = own ? own.created_at : null;
+            try { sessionStorage.setItem(UPDATED_CACHE_KEY, JSON.stringify({ at: at, fetched: Date.now() })); } catch (e) { /* ignorera */ }
+            renderUpdatedTag(at);
+        } catch (e) { /* utan åtkomst till biblioteket visas ingen tagg */ }
     }
 
     // Klick på dropzonen öppnar filväljaren.
     dropzone.addEventListener('click', function () { fileInput.click(); });
 
-    // Ladda ner medarbetarfilen (manuellt klick – aldrig blockerat).
-    peopleDownloadBtn.addEventListener('click', function () {
-        if (pendingPeopleFile) downloadText(pendingPeopleFile.name, pendingPeopleFile.markdown);
-    });
     fileInput.addEventListener('change', function () {
         processFile(fileInput.files && fileInput.files[0]);
         fileInput.value = ''; // tillåt samma fil igen
@@ -1118,6 +1377,7 @@
     );
     chatHistory.forEach(function (m) { addMessage(m.text, m.who, { html: m.html, noSave: true }); });
     setFace('standard', 'Redo att hjälpa till');
+    refreshUpdatedTag();
 
     // Pratbubbla: visas i 3 sekunder, bara på startsidan (sbr.wiki/).
     // Klick öppnar chatten.
