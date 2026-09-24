@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.11.0
+// @version      1.12.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -20,15 +20,57 @@
     // =========================================================================
     // KONFIGURATION
     // =========================================================================
-    // OBS: API-nyckeln ligger i klartext i detta script. Alla som kan öppna
-    // Tampermonkey-panelen eller webbläsarkonsolen på en dator där scriptet är
-    // installerat kan läsa den. För privat/eget bruk är det ok. Ska verktyget
-    // spridas till kollegor: lägg en proxy (serverless-funktion) mellan
-    // webbläsaren och Mistral så nyckeln aldrig hamnar i klienten.
-    // API-nyckeln sparas lokalt i webbläsaren (GM-lagring) och matas in via
-    // Inställningar → API — så du slipper klistra in den i koden vid varje
-    // uppdatering.
-    function getActiveKey() { return (GM_getValue('sbr_api_key_primary', '') || '').trim(); }
+    // API-NYCKEL
+    // Kollegor behöver inte lägga in någon nyckel: skriptet läser den från en
+    // opublicerad (olistad) sida på intranätet, som bara nås inifrån VPN:et.
+    // Nyckeln står alltså aldrig i detta (publika) script. Sidan ska innehålla
+    // en rad:  SBR-ASSISTENT-NYCKEL: <mistral-nyckel>
+    // Byter du nyckel på sidan hämtar alla automatiskt den nya (inom ett dygn,
+    // direkt om den gamla slutar fungera).
+    // En nyckel som administratören sparat under Inställningar → API går före.
+    const KEY_PAGE_SLUG   = 'sbr-assistent-konfig';
+    const KEY_MARKER      = 'SBR-ASSISTENT-NYCKEL';
+    const KEY_REFRESH_MS  = 24 * 60 * 60 * 1000;
+
+    function getManualKey()   { return (GM_getValue('sbr_api_key_primary', '') || '').trim(); }
+    function getIntranetKey() { return (GM_getValue('sbr_api_key_intranet', '') || '').trim(); }
+    function getActiveKey()   { return getManualKey() || getIntranetKey(); }
+
+    // Hämtar nyckeln från intranätsidan. Provar både "snygg" permalänk och
+    // ?pagename=, så det fungerar oavsett WordPress permalänkinställning.
+    async function fetchIntranetKey() {
+        const urls = ['/' + KEY_PAGE_SLUG + '/', '/?pagename=' + KEY_PAGE_SLUG, '/wp/?pagename=' + KEY_PAGE_SLUG];
+        const re = new RegExp(KEY_MARKER + '\\s*:?\\s*([A-Za-z0-9_\\-]{16,})');
+        for (const url of urls) {
+            try {
+                const resp = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
+                if (!resp.ok) continue;
+                const text = (await resp.text()).replace(/<[^>]+>/g, ' ');
+                const m = text.match(re);
+                if (m) return m[1];
+            } catch (e) { /* prova nästa adress */ }
+        }
+        return '';
+    }
+
+    // Ser till att det finns en nyckel. force = hämta på nytt även om cachen är färsk.
+    let keyFetch = null;
+    function ensureKey(force) {
+        if (getManualKey()) return Promise.resolve(true);
+        const fresh = Date.now() - (GM_getValue('sbr_api_key_intranet_at', 0) || 0) < KEY_REFRESH_MS;
+        if (getIntranetKey() && fresh && !force) return Promise.resolve(true);
+        if (!keyFetch) {
+            keyFetch = fetchIntranetKey().then(function (key) {
+                if (key) {
+                    GM_setValue('sbr_api_key_intranet', key);
+                    GM_setValue('sbr_api_key_intranet_at', Date.now());
+                }
+                keyFetch = null;
+                return !!getActiveKey();
+            });
+        }
+        return keyFetch;
+    }
 
     const AGENT_ID        = 'ag_01a04332de4d77928734509ebaa435ed';
 
@@ -513,8 +555,12 @@
             <div id="sbr-sub-api" class="sbr-subview">
                 <div class="sbr-settings-section">
                     <h3>API-nyckel</h3>
-                    <p>Klistra in din Mistral-nyckel här. Den sparas lokalt i din webbläsare, så du slipper lägga in den på nytt varje gång skriptet uppdateras.</p>
-                    <input type="password" id="sbr-key-primary" class="sbr-input" placeholder="Mistral API-nyckel" autocomplete="off">
+                    <ul class="sbr-step-list">
+                        <li>Kollegor behöver ingen nyckel – den hämtas automatiskt från intranätsidan <strong>/${KEY_PAGE_SLUG}/</strong></li>
+                        <li>Fyll bara i här om du vill använda en egen nyckel i denna webbläsare</li>
+                        <li>Lämna tomt och spara för att gå tillbaka till intranätets nyckel</li>
+                    </ul>
+                    <input type="password" id="sbr-key-primary" class="sbr-input" placeholder="Egen Mistral-nyckel (valfritt)" autocomplete="off">
                     <div class="sbr-key-row">
                         <button class="sbr-btn" id="sbr-key-save">Spara nyckel</button>
                         <label class="sbr-key-show"><input type="checkbox" id="sbr-key-reveal"> Visa</label>
@@ -670,6 +716,7 @@
 
     async function callMistralWithRetry(question) {
         let lastErr = null;
+        let keyRefreshed = false;
         // Väntetider mellan försöken (exponentiell backoff): 2s, sedan 5s.
         // Ger en tillfällig serverstörning tid att återhämta sig.
         const BACKOFF_MS = [2000, 5000];
@@ -681,6 +728,13 @@
                 lastErr = new Error('Tomt svar.');
             } catch (e) {
                 lastErr = e;
+                // Ogiltig nyckel: har den bytts på intranätsidan? Hämta om en gång.
+                if (/^HTTP 401/.test(e.message) && !getManualKey() && !keyRefreshed) {
+                    keyRefreshed = true;
+                    const before = getIntranetKey();
+                    await ensureKey(true);
+                    if (getIntranetKey() && getIntranetKey() !== before) { attempt--; continue; }
+                }
             }
             if (attempt < MAX_ATTEMPTS) {
                 const waitMs = BACKOFF_MS[attempt - 1] || 5000;
@@ -713,10 +767,11 @@
             }
         }
 
-        // Ingen nyckel inlagd? Vägled till Inställningar istället för att få 401.
+        // Ingen nyckel ännu? Försök hämta den från intranätet först.
+        if (!getActiveKey()) await ensureKey(true);
         if (!getActiveKey()) {
             addMessage(question, 'user');
-            addMessage('Ingen API-nyckel är inlagd ännu. Öppna fliken Inställningar och klistra in din Mistral-nyckel, så kan jag svara.', 'bot');
+            addMessage('Jag kunde inte hämta min nyckel från intranätet just nu. Kontrollera att du är ansluten via VPN och försök igen.', 'bot');
             input.value = '';
             input.style.height = 'auto';
             return;
@@ -795,7 +850,7 @@
         settingsUnlocked = unlocked;
         settingsView.classList.toggle('unlocked', unlocked);
         // API-nyckeln läggs bara in i fältet när inställningarna är upplåsta.
-        keyPrimary.value = unlocked ? getActiveKey() : '';
+        keyPrimary.value = unlocked ? getManualKey() : '';
         keyPrimary.type = 'password';
         keyReveal.checked = false;
         keyStatus.textContent = '';
@@ -878,9 +933,9 @@
         GM_setValue('sbr_api_key_primary', keyPrimary.value.trim());
         try { sessionStorage.removeItem(UPDATED_CACHE_KEY); } catch (e) { /* ignorera */ }
         refreshUpdatedTag();
-        keyStatus.textContent = getActiveKey()
-            ? 'Sparat. Nyckeln används vid nästa fråga.'
-            : 'Sparat, men fältet är tomt – lägg in en nyckel för att kunna ställa frågor.';
+        keyStatus.textContent = getManualKey()
+            ? 'Sparat. Din egen nyckel används i denna webbläsare.'
+            : 'Fältet är tomt – nyckeln från intranätsidan används.';
     });
 
 
@@ -1090,6 +1145,8 @@
             const modified  = validDate(childText(item, 'post_modified').slice(0, 10));
 
             if (body.length < 30) { skipped++; continue; }
+            // Nyckelsidan får aldrig hamna i Mistral-biblioteket.
+            if (body.indexOf(KEY_MARKER) !== -1 || link.indexOf(KEY_PAGE_SLUG) !== -1) { skipped++; continue; }
 
             // Är sidan en personallista? Lägg då varje person i den SEPARATA
             // personalfilen (bättre sökbarhet – listan drunknar inte bland
@@ -1419,7 +1476,7 @@
     );
     chatHistory.forEach(function (m) { addMessage(m.text, m.who, { html: m.html, noSave: true }); });
     setFace('standard', 'Redo att hjälpa till');
-    refreshUpdatedTag();
+    ensureKey(false).then(refreshUpdatedTag);
 
     // Pratbubbla: visas i 3 sekunder, bara på startsidan (sbr.wiki/).
     // Klick öppnar chatten.
