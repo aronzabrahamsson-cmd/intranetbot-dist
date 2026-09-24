@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.9.0
+// @version      1.9.1
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -87,15 +87,23 @@
         if (stored) peopleRecords = JSON.parse(stored);
     } catch (e) { peopleRecords = []; }
 
-    // Normaliserar text för namnjämförelse (gemener, trimmat).
-    function normName(s) { return (s || '').toLowerCase().trim(); }
+    // Normaliserar text för namnjämförelse (gemener, trimmat, utan
+    // diakritiska tecken) så att t.ex. "muller" hittar "Müller" och
+    // "jose" hittar "José". å/ä/ö behålls som egna bokstäver.
+    function normName(s) {
+        return (s || '').toLowerCase()
+            .replace(/[åäö]/g, c => ({ 'å': '\u0001', 'ä': '\u0002', 'ö': '\u0003' })[c])
+            .normalize('NFD').replace(/\p{M}/gu, '')
+            .replace(/[\u0001-\u0003]/g, c => 'åäö'[c.charCodeAt(0) - 1])
+            .trim();
+    }
 
     // Slår upp personer vars namn matchar en fråga. Matchar hela ord i namnet
     // mot orden i frågan, så "vem är erika?" hittar alla med förnamn/efternamn
     // Erika. Returnerar en array med matchande poster (kan vara tom).
     function lookupPeople(question) {
         if (!peopleRecords || !peopleRecords.length) return null;
-        const qWords = normName(question).replace(/[?.,!]/g, ' ').split(/\s+/).filter(Boolean);
+        const qWords = normName(question).replace(/[?.,!:;"()]/g, ' ').split(/\s+/).filter(Boolean);
         if (!qWords.length) return [];
         const hits = [];
         for (const rec of peopleRecords) {
@@ -125,8 +133,9 @@
     // Avgör om frågan ser ut som en personfråga (för att undvika att kapa
     // policyfrågor som råkar innehålla ett namn-liknande ord).
     function looksLikePersonQuery(question) {
-        return /\b(vem|vilka|kontakt|mejl|mejla|maila|mail|telefon|ringa|nå|når)\b/i.test(question)
-            || /^\s*[A-Za-zÅÄÖåäö.\-]+\s*$/.test(question); // enbart ett ord/namn
+        // \b fungerar bara för a–z i JS, därför egna ordgränser med \p{L}.
+        return /(?<![\p{L}\p{M}])(vem|vilka|kontakt|mejl|mejla|maila|mail|telefon|ringa|nå|når)(?![\p{L}\p{M}])/iu.test(question)
+            || /^\s*[\p{L}\p{M}'’.\-]+\s*$/u.test(question); // enbart ett ord/namn
     }
 
     // =========================================================================
@@ -797,10 +806,26 @@
     // att vara en personallista.
     function expandPeople(title, link, body) {
         // En "riktig" personpost känns igen på att den innehåller en e-postadress.
-        const personRe = /-\s*([A-ZÅÄÖ][\wåäöÅÄÖ.\-]+(?:\s+[A-ZÅÄÖ][\wåäöÅÄÖ.\-]+)+?)\s*,\s*([\s\S]*?E-post:\s*[\w.\-]+@[\w.\-]+(?:\s*\(mailto:[^)]+\))?)/g;
+        // Namnet får innehålla alla bokstäver (ü, é, ø …), apostrof och
+        // bindestreck; efternamnsdelar får börja med gemen (von, de, van der).
+        // Posten får inte sträcka sig över nästa listpunkt, så en person kan
+        // inte "svälja" nästa person i listan.
+        const personRe = /-\s*(\p{Lu}[\p{L}\p{M}'’.\-]+(?:\s+[\p{L}\p{M}'’.\-]+)+?)\s*,\s*((?:(?!\n\s*-\s)[\s\S])*?E-post:\s*[\w.+\-]+@[\w.\-]+(?:\s*\(mailto:[^)]+\))?)/gu;
         const matches = [];
         let m;
         while ((m = personRe.exec(body)) !== null) matches.push(m);
+
+        // Diagnostik: e-postadresser som inte hamnade i någon tolkad person.
+        // Dessa personer skulle annars försvinna tyst.
+        const unparsed = [];
+        const epostRe = /E-post:/g;
+        let e;
+        while ((e = epostRe.exec(body)) !== null) {
+            const idx = e.index;
+            if (matches.some(mm => idx >= mm.index && idx < mm.index + mm[0].length)) continue;
+            const start = body.lastIndexOf('\n', idx) + 1;
+            unparsed.push(body.slice(start, idx).replace(/\s+/g, ' ').trim().slice(0, 80) || '(okänd rad)');
+        }
 
         // Kräver minst 3 personer för att räknas som en personallista.
         if (matches.length < 3) return null;
@@ -826,7 +851,7 @@
 
             records.push({ name: name, title: title2, tel: tel, mob: mob, mail: mail, url: link });
         }
-        return { sections: sections, records: records };
+        return { sections: sections, records: records, unparsed: unparsed };
     }
 
     function convertXmlToMarkdown(xmlText) {
@@ -850,6 +875,7 @@
         const sections = [];        // policys, rutiner, nyheter, sidor
         const peopleSections = [];  // personallistan – egen fil för bättre sökbarhet
         const peopleRecords  = [];  // strukturerad personaldata för lokalt uppslag
+        const unparsedPeople = [];  // personposter som inte kunde tolkas
         let kept = 0, skipped = 0, peopleCount = 0;
 
         // Långa sidor (t.ex. personallistan "Mina kollegor") styckas upp så att
@@ -885,6 +911,7 @@
             if (people) {
                 for (const p of people.sections) peopleSections.push(p);
                 for (const r of people.records) peopleRecords.push(r);
+                for (const u of people.unparsed) unparsedPeople.push(title + ': ' + u);
                 peopleCount += people.sections.length;
                 kept++;
                 continue;
@@ -922,7 +949,8 @@
         }
 
         return { content: content, people: people, records: peopleRecords,
-                 kept: kept, skipped: skipped, peopleCount: peopleCount };
+                 kept: kept, skipped: skipped, peopleCount: peopleCount,
+                 unparsedPeople: unparsedPeople };
     }
 
     function downloadText(filename, text) {
@@ -978,6 +1006,11 @@
                     pendingPeopleFile = null;
                 }
                 msg += '\nLadda upp BÅDA filerna i Mistral-biblioteket (steg 3).';
+                if (result.unparsedPeople && result.unparsedPeople.length) {
+                    msg += '\n\n⚠️ ' + result.unparsedPeople.length +
+                           ' personposter kunde inte tolkas och saknas i medarbetarfilen:\n' +
+                           result.unparsedPeople.map(u => '• ' + u).join('\n');
+                }
                 showConvertStatus(msg);
             } catch (e) {
                 showConvertStatus('Fel: ' + e.message);
