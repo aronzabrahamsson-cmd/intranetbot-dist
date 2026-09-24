@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.12.2
+// @version      1.13.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -136,6 +136,44 @@
         const stored = GM_getValue('sbr_people', '');
         if (stored) peopleRecords = JSON.parse(stored);
     } catch (e) { peopleRecords = []; }
+
+    // Alla (inte bara administratören) får exakta personsvar direkt: listan
+    // läses från intranätets sida "Mina kollegor" och tolkas med samma kod
+    // som konverteraren. Cachas i fliken en timme. Hittas färre än 3 personer
+    // används det som redan finns (eller Mistral) som tidigare.
+    const STAFF_PAGE_URL   = '/mina-kollegor/';
+    const STAFF_CACHE_KEY  = 'sbr_staff_live';
+    const STAFF_CACHE_MS   = 60 * 60 * 1000;
+    let staffFetch = null;
+
+    function loadLiveStaff() {
+        try {
+            const c = JSON.parse(sessionStorage.getItem(STAFF_CACHE_KEY) || 'null');
+            if (c && Date.now() - c.at < STAFF_CACHE_MS) {
+                // Även ett misslyckat försök cachas, så sidan inte hämtas vid varje fråga.
+                if (c.records.length >= 3) peopleRecords = c.records;
+                return Promise.resolve(c.records.length >= 3);
+            }
+        } catch (e) { /* ingen cache */ }
+        if (staffFetch) return staffFetch;
+        staffFetch = fetch(STAFF_PAGE_URL, { credentials: 'same-origin', cache: 'no-store' })
+            .then(r => r.ok ? r.text() : '')
+            .then(function (html) {
+                const remember = recs => { try { sessionStorage.setItem(STAFF_CACHE_KEY, JSON.stringify({ at: Date.now(), records: recs })); } catch (e) { /* ignorera */ } };
+                if (!html) { remember([]); return false; }
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                doc.querySelectorAll('script, style, noscript, nav, header, footer, form').forEach(el => el.remove());
+                const main = doc.querySelector('main, article, .entry-content, #content') || doc.body;
+                const people = expandPeople('Mina kollegor', location.origin + STAFF_PAGE_URL, cleanContent(main.innerHTML));
+                if (!people || people.records.length < 3) { remember([]); return false; }
+                peopleRecords = people.records;
+                remember(people.records);
+                return true;
+            })
+            .catch(() => false)
+            .finally(() => { staffFetch = null; });
+        return staffFetch;
+    }
 
     // Normaliserar text för namnjämförelse (gemener, trimmat, utan
     // diakritiska tecken) så att t.ex. "muller" hittar "Müller" och
@@ -753,6 +791,7 @@
         // Väg 2: exakt personuppslag lokalt – fungerar även utan API-nyckel,
         // eftersom det inte använder RAG. Kollas först.
         if (looksLikePersonQuery(question)) {
+            await loadLiveStaff();
             const hits = lookupPeople(question);
             if (hits && hits.length) {
                 addMessage(question, 'user');
@@ -1475,6 +1514,7 @@
     chatHistory.forEach(function (m) { addMessage(m.text, m.who, { html: m.html, noSave: true }); });
     setFace('standard', 'Redo att hjälpa till');
     ensureKey(false).then(refreshUpdatedTag);
+    loadLiveStaff();
 
     // Pratbubbla: visas i 3 sekunder, bara på startsidan (sbr.wiki/).
     // Klick öppnar chatten.
