@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.12.1
+// @version      1.12.2
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -191,14 +191,10 @@
     // =========================================================================
     // UI
     // =========================================================================
-    // Typsnitt som matchar sajten: tung geometrisk sans-serif (Poppins),
-    // med Montserrat/system som fallback. Importeras utan att störa sidan.
-    const fontLink = document.createElement('link');
-    fontLink.rel = 'stylesheet';
-    fontLink.href = 'https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap';
-    document.head.appendChild(fontLink);
-
-    const FONT = `'Poppins', 'Montserrat', -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif`;
+    // Typsnitt: inget hämtas utifrån (tidigare Google Fonts, som skickade
+    // besökarens IP-adress till Google). Poppins används om sajten redan har
+    // laddat det, annars datorns eget systemtypsnitt (Segoe UI på Windows).
+    const FONT = `'Poppins', 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif`;
 
     const style = document.createElement('style');
     style.textContent = `
