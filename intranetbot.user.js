@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.9.1
+// @version      1.9.2
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -787,12 +787,14 @@
         s = s.replace(/<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi, '$2 ($1)'); // länkar -> text (url)
         s = s.replace(/<li[^>]*>/gi, '- ');                             // listpunkter
         s = s.replace(/<\/(p|h[1-6]|li|ul|ol|div|blockquote|tr)>/gi, '\n'); // blockslut -> radbryt
+        s = s.replace(/<br\s*\/?>/gi, '\n');                           // <br> -> radbryt (annars klistras fält ihop)
         s = s.replace(/<[^>]+>/g, '');                                  // kvarvarande taggar
         // avkoda HTML-entiteter
         const ta = document.createElement('textarea');
         ta.innerHTML = s;
         s = ta.value;
         s = s.replace(/\u00a0/g, ' ');                                  // hårda mellanslag
+        s = s.replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '');         // osynliga tecken (nollbredd, mjukt bindestreck)
         s = s.replace(/[ \t]+\n/g, '\n');
         s = s.replace(/\n{3,}/g, '\n\n');
         return s.trim();
@@ -805,51 +807,84 @@
     // Returnerar en array av sektionssträngar, eller null om sidan inte ser ut
     // att vara en personallista.
     function expandPeople(title, link, body) {
-        // En "riktig" personpost känns igen på att den innehåller en e-postadress.
-        // Namnet får innehålla alla bokstäver (ü, é, ø …), apostrof och
-        // bindestreck; efternamnsdelar får börja med gemen (von, de, van der).
-        // Posten får inte sträcka sig över nästa listpunkt, så en person kan
-        // inte "svälja" nästa person i listan.
-        const personRe = /-\s*(\p{Lu}[\p{L}\p{M}'’.\-]+(?:\s+[\p{L}\p{M}'’.\-]+)+?)\s*,\s*((?:(?!\n\s*-\s)[\s\S])*?E-post:\s*[\w.+\-]+@[\w.\-]+(?:\s*\(mailto:[^)]+\))?)/gu;
-        const matches = [];
-        let m;
-        while ((m = personRe.exec(body)) !== null) matches.push(m);
+        // Varje listpunkt ("- …") som har minst ett kontaktfält (Telefon:,
+        // Mobil:, E-post:) räknas som en personpost. Posten tolkas fält för
+        // fält i stället för med ett enda strikt mönster, så den klarar:
+        //  - namn med alla sorters bokstäver (ü, é, ø …) och "von"/"de",
+        //  - saknat kommatecken mellan namn och titel ("Isak Reisberg Turistinformatör"),
+        //  - fält som sitter ihop ("UtvecklingsledareTelefon:"),
+        //  - e-postlänkar vars text inte är adressen ("Skicka e-post").
+        const FIELD_SPLIT = /(Mobiltelefon|Telefon|Mobil|[Ee]-post)\s*:/;
+        const EMAIL_RE    = /[^\s@(),;:<>]+@[^\s@(),;:<>]+\.[A-Za-z]{2,}/;
+        const PARTICLES   = ['von', 'van', 'der', 'den', 'de', 'af', 'av', 'la', 'le', 'di', 'da', 'del', 'du', 'ten', 'ter'];
 
-        // Diagnostik: e-postadresser som inte hamnade i någon tolkad person.
-        // Dessa personer skulle annars försvinna tyst.
+        function cleanPhone(v) {
+            const m = (v || '').match(/^\s*(\+?[\d ()\-–]*\d)/);
+            return m ? m[1].replace(/\s+/g, ' ').trim() : '';
+        }
+
+        // Delar "Namn, Titel" / "Namn – Titel" / "Namn Titel" i namn och titel.
+        function splitNameTitle(head) {
+            head = head.replace(/[\s,;:–—|\-]+$/, '').trim();
+            if (!/^\p{L}/u.test(head)) return null;
+            if (head.indexOf(',') === -1) head = head.replace(/\s+[–—|\-]\s+/, ', ');
+            let name, role;
+            const ci = head.indexOf(',');
+            if (ci !== -1) {
+                name = head.slice(0, ci).trim();
+                role = head.slice(ci + 1).replace(/^[\s,]+/, '').trim();
+            } else {
+                // Inget skiljetecken: förnamn + ev. partiklar (von, de …) +
+                // efternamn blir namnet, resten blir titeln.
+                const words = head.split(' ');
+                let n = 1;
+                while (n < words.length && PARTICLES.indexOf(words[n].toLowerCase()) !== -1) n++;
+                if (n < words.length) n++;
+                name = words.slice(0, n).join(' ');
+                role = words.slice(n).join(' ');
+            }
+            if (!/^\p{L}/u.test(name) || name.length > 60 || name.split(' ').length > 6) return null;
+            return { name: name, title: role };
+        }
+
+        const people   = [];
         const unparsed = [];
-        const epostRe = /E-post:/g;
-        let e;
-        while ((e = epostRe.exec(body)) !== null) {
-            const idx = e.index;
-            if (matches.some(mm => idx >= mm.index && idx < mm.index + mm[0].length)) continue;
-            const start = body.lastIndexOf('\n', idx) + 1;
-            unparsed.push(body.slice(start, idx).replace(/\s+/g, ' ').trim().slice(0, 80) || '(okänd rad)');
+        for (const raw of body.split(/\n(?=\s*-\s)/)) {
+            const flat = raw.replace(/\s+/g, ' ').trim();
+            if (!/^-\s/.test(flat) || !FIELD_SPLIT.test(flat)) continue;
+
+            // parts = [huvud, etikett1, värde1, etikett2, värde2, …]
+            const parts = flat.replace(/^-\s*/, '').split(new RegExp(FIELD_SPLIT.source, 'g'));
+            const fields = {};
+            for (let i = 1; i < parts.length; i += 2) {
+                const key = /post/i.test(parts[i]) ? 'mail' : (/^Mobil/.test(parts[i]) ? 'mob' : 'tel');
+                if (!fields[key]) fields[key] = parts[i + 1] || '';
+            }
+            const nt = splitNameTitle(parts[0]);
+            if (!nt) { unparsed.push(flat.slice(0, 120)); continue; }
+
+            // E-post: helst från E-post-fältet, annars från en mailto-länk i posten.
+            const mail = ((fields.mail || '').match(EMAIL_RE) || flat.match(EMAIL_RE) || [''])[0];
+            people.push({ name: nt.name, title: nt.title,
+                          tel: cleanPhone(fields.tel), mob: cleanPhone(fields.mob), mail: mail });
         }
 
         // Kräver minst 3 personer för att räknas som en personallista.
-        if (matches.length < 3) return null;
+        if (people.length < 3) return null;
 
         const sections = [];
         const records  = [];   // strukturerad data för lokalt personuppslag
-        for (const mm of matches) {
-            const name = mm[1].trim();
-            let rest = mm[2].replace(/\s*\(mailto:[^)]+\)/g, '');
-            const title2 = rest.split(/Telefon|Mobil|E-post/)[0].trim().replace(/,+$/, '');
-            const tel  = (rest.match(/Telefon:\s*([+\d ()\-]+)/) || [null, ''])[1].trim();
-            const mob  = (rest.match(/Mobil:\s*([+\d ()\-]+)/) || [null, ''])[1].trim();
-            const mail = (rest.match(/E-post:\s*([\w.\-]+@[\w.\-]+)/) || [null, ''])[1].trim();
-
-            let sec = '### ' + name + (title2 ? ' – ' + title2 : '') + '\n';
+        for (const p of people) {
+            let sec = '### ' + p.name + (p.title ? ' – ' + p.title : '') + '\n';
             if (link) sec += 'URL: ' + link + '\n';
-            sec += '\n' + name + (title2 ? ', ' + title2 : '') + '.';
-            if (tel)  sec += ' Telefon: ' + tel + '.';
-            if (mob)  sec += ' Mobil: ' + mob + '.';
-            if (mail) sec += ' E-post: [' + mail + '](mailto:' + mail + ').';
+            sec += '\n' + p.name + (p.title ? ', ' + p.title : '') + '.';
+            if (p.tel)  sec += ' Telefon: ' + p.tel + '.';
+            if (p.mob)  sec += ' Mobil: ' + p.mob + '.';
+            if (p.mail) sec += ' E-post: [' + p.mail + '](mailto:' + p.mail + ').';
             sec += '\n';
             sections.push(sec);
 
-            records.push({ name: name, title: title2, tel: tel, mob: mob, mail: mail, url: link });
+            records.push({ name: p.name, title: p.title, tel: p.tel, mob: p.mob, mail: p.mail, url: link });
         }
         return { sections: sections, records: records, unparsed: unparsed };
     }
