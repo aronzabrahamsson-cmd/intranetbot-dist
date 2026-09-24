@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.10.0
+// @version      1.11.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -48,10 +48,10 @@
     // hit direkt via API, och datumtaggen i sidhuvudet läses härifrån.
     const LIBRARY_ID          = '01a047a2-a3ed-768a-930f-615e7aa150d6';
     const LIBRARY_API_URL     = 'https://api.mistral.ai/v1/libraries/' + LIBRARY_ID;
-    const LIBRARY_CONSOLE_URL = 'https://console.mistral.ai/build/libraries/' + LIBRARY_ID;
-    // Filer i biblioteket som skriptet äger och ersätter vid publicering.
-    // Andra filer i biblioteket lämnas orörda.
-    const OWN_DOC_RE          = /-(innehall|medarbetare)\.md$/i;
+    // Filer i biblioteket som skriptet äger och ersätter vid publicering:
+    // allt som slutar på -innehall.md / -medarbetare.md, även med webbläsarens
+    // dubblettsuffix (t.ex. "…-innehall (1).md"). Andra filer lämnas orörda.
+    const OWN_DOC_RE          = /-(innehall|medarbetare)(\s*\(\d+\))?\.md$/i;
 
     // Bilder (base64) -> standard / arbetar / inget resultat
     const IMG = {
@@ -322,8 +322,6 @@
         .sbr-result li.warn { color: #8a5a00; }
         .sbr-result li.err  { color: #b00020; }
         .sbr-result li.sub  { padding-left: 22px; }
-        .sbr-step-links { font-size: 12px; color: #666; line-height: 1.6; }
-        .sbr-step-links a { color: #1a3d7c; }
         .sbr-field-label { font-size: 12px; font-weight: 600; color: #444; margin-top: 4px; }
         .sbr-input {
             border: 1.5px solid #ccc; border-radius: 8px; padding: 9px 11px;
@@ -337,6 +335,8 @@
         }
 
         /* Inloggning (Inställningar) */
+        #sbr-settings-general { padding: 18px; border-bottom: 1px solid #e6e6e6; }
+        .sbr-check { font-size: 13px; color: #000; display: flex; align-items: center; gap: 8px; cursor: pointer; }
         #sbr-settings-login { padding: 18px; display: flex; flex-direction: column; gap: 8px; }
         #sbr-settings-login .sbr-btn { margin-top: 8px; }
         #sbr-login-status { font-size: 12px; color: #b00020; min-height: 16px; line-height: 1.5; }
@@ -368,6 +368,47 @@
             transform: rotate(45deg);
         }
         #sbr-assistant-bubble.hide { opacity: 0; }
+
+        /* Mörkt läge (Inställningar → Utseende). Sidhuvudet är svart i båda lägena. */
+        #sbr-assistant-panel.sbr-dark { background: #161616; border-color: #3a3a3a; color: #eaeaea; }
+        .sbr-dark #sbr-assistant-messages,
+        .sbr-dark #sbr-assistant-inputrow,
+        .sbr-dark #sbr-assistant-tabs,
+        .sbr-dark .sbr-tab { background: #161616; }
+        .sbr-dark #sbr-assistant-inputrow,
+        .sbr-dark #sbr-assistant-tabs,
+        .sbr-dark #sbr-settings-general { border-color: #333; }
+        .sbr-dark .sbr-tab { color: #888; }
+        .sbr-dark .sbr-tab.active, .sbr-dark .sbr-tab:hover { color: #fff; border-bottom-color: #fff; }
+        .sbr-dark .sbr-msg.user { background: #eaeaea; color: #111; }
+        .sbr-dark .sbr-msg.bot, .sbr-dark .sbr-msg.thinking { background: #242424; color: #eaeaea; border-color: #333; }
+        .sbr-dark .sbr-msg.thinking { color: #999; }
+        .sbr-dark .sbr-msg.bot a { color: #8fb4ff; }
+        .sbr-dark .sbr-msg.bot a:hover { color: #fff; }
+        .sbr-dark #sbr-assistant-input, .sbr-dark .sbr-input { background: #242424; color: #eaeaea; border-color: #444; }
+        .sbr-dark #sbr-assistant-input:focus, .sbr-dark .sbr-input:focus { border-color: #eaeaea; }
+        .sbr-dark #sbr-assistant-send, .sbr-dark .sbr-btn { background: #eaeaea; color: #111; border-color: #eaeaea; }
+        .sbr-dark #sbr-assistant-send:hover:not(:disabled), .sbr-dark .sbr-btn:hover { background: #fff; }
+        .sbr-dark .sbr-subtab { background: #161616; color: #aaa; border-color: #444; }
+        .sbr-dark .sbr-subtab.active { background: #eaeaea; color: #111; border-color: #eaeaea; }
+        .sbr-dark .sbr-settings-section h3, .sbr-dark .sbr-step-head h3, .sbr-dark .sbr-check { color: #eaeaea; }
+        .sbr-dark .sbr-settings-section p, .sbr-dark .sbr-step-list, .sbr-dark .sbr-result,
+        .sbr-dark .sbr-field-label, .sbr-dark .sbr-key-show { color: #b5b5b5; }
+        .sbr-dark #sbr-key-status { color: #8fb4ff; }
+        .sbr-dark #sbr-login-status, .sbr-dark .sbr-result li.err { color: #ff7b7b; }
+        .sbr-dark .sbr-result li.ok .sbr-ic { color: #6fd07c; }
+        .sbr-dark .sbr-result li.warn { color: #e8b25a; }
+        .sbr-dark #sbr-settings-lock { color: #aaa; }
+        .sbr-dark #sbr-settings-lock:hover { color: #fff; }
+        .sbr-dark .sbr-step { border-color: #333; }
+        .sbr-dark .sbr-step.active { border-color: #eaeaea; }
+        .sbr-dark .sbr-step.done { border-color: #3f9a4d; }
+        .sbr-dark .sbr-step-num { background: #eaeaea; color: #111; }
+        .sbr-dark .sbr-step.done .sbr-step-num { background: #3f9a4d; color: #fff; }
+        .sbr-dark #sbr-dropzone { border-color: #555; color: #ccc; }
+        .sbr-dark #sbr-dropzone:hover, .sbr-dark #sbr-dropzone.dragover { border-color: #eaeaea; background: #242424; }
+        #sbr-assistant-bubble.sbr-dark { background: #242424; color: #eaeaea; border-color: #555; }
+        #sbr-assistant-bubble.sbr-dark::after { background: #242424; border-color: #555; }
     `;
     document.head.appendChild(style);
 
@@ -406,10 +447,16 @@
             </div>
         </div>
         <div id="sbr-settings-view" class="sbr-view">
+            <div id="sbr-settings-general">
+                <div class="sbr-settings-section">
+                    <h3>Utseende</h3>
+                    <label class="sbr-check"><input type="checkbox" id="sbr-dark-toggle"> Mörkt läge</label>
+                </div>
+            </div>
             <form id="sbr-settings-login" autocomplete="off">
                 <div class="sbr-settings-section">
-                    <h3>Logga in</h3>
-                    <p>Inställningarna är låsta. Logga in som administratör för att fortsätta.</p>
+                    <h3>Administratör</h3>
+                    <p>Logga in för att hantera data och API-nyckel.</p>
                 </div>
                 <label class="sbr-field-label" for="sbr-login-user">Användarnamn</label>
                 <input type="text" id="sbr-login-user" class="sbr-input" autocomplete="off">
@@ -460,10 +507,6 @@
                     </ul>
                     <button class="sbr-btn" id="sbr-publish-btn" disabled>Publicera till Mistral</button>
                     <ul class="sbr-result" id="sbr-publish-result"></ul>
-                    <div class="sbr-step-links">
-                        Ladda ner istället: <a href="#" id="sbr-dl-content">innehåll</a> · <a href="#" id="sbr-dl-people">medarbetare</a><br>
-                        <a href="${LIBRARY_CONSOLE_URL}" target="_blank" rel="noopener noreferrer">Öppna biblioteket i Mistral ↗</a>
-                    </div>
                 </div>
             </div>
 
@@ -729,7 +772,6 @@
                 views[k].classList.toggle('active', k === tab.dataset.view);
             });
             if (tab.dataset.view === 'chat') input.focus();
-            if (tab.dataset.view === 'settings' && !settingsUnlocked) loginUser.focus();
         });
     });
 
@@ -772,6 +814,26 @@
             loginStatus.textContent = 'Fel användarnamn eller lösenord.';
             loginPass.focus();
         }
+    });
+
+    // =========================================================================
+    // MÖRKT LÄGE (sparas lokalt i webbläsaren)
+    // =========================================================================
+    const DARK_KEY   = 'sbr_dark_mode';
+    const darkToggle = panel.querySelector('#sbr-dark-toggle');
+    function applyDarkMode(on) {
+        panel.classList.toggle('sbr-dark', on);
+        const b = document.getElementById('sbr-assistant-bubble');
+        if (b) b.classList.toggle('sbr-dark', on);
+    }
+    let darkMode = false;
+    try { darkMode = localStorage.getItem(DARK_KEY) === '1'; } catch (e) { /* lagring ej tillgänglig */ }
+    darkToggle.checked = darkMode;
+    applyDarkMode(darkMode);
+    darkToggle.addEventListener('change', function () {
+        darkMode = darkToggle.checked;
+        try { localStorage.setItem(DARK_KEY, darkMode ? '1' : '0'); } catch (e) { /* ignorera */ }
+        applyDarkMode(darkMode);
     });
 
     panel.querySelector('#sbr-settings-lock').addEventListener('click', function () {
@@ -1082,17 +1144,6 @@
                  unparsedPeople: unparsedPeople };
     }
 
-    function downloadText(filename, text) {
-        const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
-        const url  = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-    }
-
     function processFile(file) {
         if (!file) return;
         if (!/\.xml$/i.test(file.name) && file.type.indexOf('xml') === -1) {
@@ -1133,7 +1184,6 @@
                 setStep(3, 'active');
                 publishBtn.disabled = false;
                 setResult(publishResult, []);
-                panel.querySelector('#sbr-dl-people').style.display = result.people ? '' : 'none';
             } catch (e) {
                 showConvertStatus(e.message, 'err');
             }
@@ -1269,14 +1319,6 @@
 
     publishBtn.addEventListener('click', publishToMistral);
 
-    // Manuell reserv: ladda ner filerna och ladda upp dem i konsolen.
-    function downloadConverted(kind) {
-        const f = converted && converted.files.find(x => x.name.indexOf('-' + kind + '.md') !== -1);
-        if (f) downloadText(f.name, f.markdown);
-    }
-    panel.querySelector('#sbr-dl-content').addEventListener('click', e => { e.preventDefault(); downloadConverted('innehall'); });
-    panel.querySelector('#sbr-dl-people').addEventListener('click', e => { e.preventDefault(); downloadConverted('medarbetare'); });
-
     // =========================================================================
     // DATUMTAGG ("uppdaterad …") I SIDHUVUDET
     // =========================================================================
@@ -1386,6 +1428,7 @@
         const bubble = document.createElement('div');
         bubble.id = 'sbr-assistant-bubble';
         bubble.textContent = 'Hej! Vill du ha hjälp? Klicka här!';
+        if (darkMode) bubble.classList.add('sbr-dark');
         document.body.appendChild(bubble);
 
         function removeBubble() {
