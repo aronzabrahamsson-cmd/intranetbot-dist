@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.13.0
+// @version      1.14.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -257,6 +257,10 @@
             font-family: ${FONT};
         }
         #sbr-assistant-panel.open { display: flex; }
+        /* Maximerad: hela fönstrets höjd (bredden behålls). */
+        #sbr-assistant-panel.maximized { top: 16px; bottom: 16px; height: auto; max-height: none; }
+        /* Ljusa rullningslister i ljust läge (mörka sätts under Mörkt läge). */
+        #sbr-assistant-panel { color-scheme: light; }
 
         #sbr-assistant-header {
             display: flex; align-items: center; gap: 12px;
@@ -272,12 +276,13 @@
         #sbr-assistant-header .sbr-status { font-size: 12px; color: #bdbdbd; min-height: 15px; font-weight: 400; }
         /* Datumtagg: syns bättre ju äldre biblioteket är (se renderUpdatedTag). */
         #sbr-updated { font-size: 11px; font-weight: 400; color: #000; white-space: nowrap; }
-        #sbr-assistant-close, #sbr-assistant-min {
+        #sbr-assistant-close, #sbr-assistant-min, #sbr-assistant-max {
             border: none; background: transparent; cursor: pointer;
             font-size: 22px; line-height: 1; color: #bdbdbd; padding: 4px 6px; font-family: ${FONT};
         }
         #sbr-assistant-min { margin-left: auto; }
-        #sbr-assistant-close:hover, #sbr-assistant-min:hover { color: #fff; }
+        #sbr-assistant-max { font-size: 17px; }
+        #sbr-assistant-close:hover, #sbr-assistant-min:hover, #sbr-assistant-max:hover { color: #fff; }
 
         #sbr-assistant-messages {
             flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px;
@@ -449,6 +454,10 @@
 
         /* Mörkt läge (Inställningar → Utseende). Sidhuvudet är svart i båda lägena. */
         #sbr-assistant-panel.sbr-dark { background: #161616; border-color: #3a3a3a; color: #eaeaea; }
+        /* Rullningslister (inkl. pilar) i mörkt: color-scheme ger webbläsarens
+           mörka rullningslist, scrollbar-color styr färgerna där det stöds. */
+        #sbr-assistant-panel.sbr-dark { color-scheme: dark; }
+        #sbr-assistant-panel.sbr-dark, #sbr-assistant-panel.sbr-dark * { scrollbar-color: #555 #1e1e1e; }
         .sbr-dark #sbr-assistant-messages,
         .sbr-dark #sbr-assistant-inputrow,
         .sbr-dark #sbr-assistant-tabs,
@@ -511,6 +520,7 @@
                 </div>
             </div>
             <button id="sbr-assistant-min" title="Minimera">–</button>
+            <button id="sbr-assistant-max" title="Maximera" aria-label="Maximera">□</button>
             <button id="sbr-assistant-close" title="Stäng">×</button>
         </div>
         <div id="sbr-assistant-tabs">
@@ -1494,6 +1504,25 @@
 
     // Minimera = stäng rutan (den runda ikonen finns kvar för att öppna igen).
     panel.querySelector('#sbr-assistant-min').addEventListener('click', closePanel);
+
+    // Maximera = hela fönstrets höjd. Valet sparas lokalt i webbläsaren.
+    const MAX_KEY = 'sbr_maximized';
+    const maxBtn  = panel.querySelector('#sbr-assistant-max');
+    function applyMaximized(on) {
+        panel.classList.toggle('maximized', on);
+        maxBtn.textContent = on ? '❐' : '□';
+        maxBtn.title = on ? 'Återställ storlek' : 'Maximera';
+        maxBtn.setAttribute('aria-label', maxBtn.title);
+        messages.scrollTop = messages.scrollHeight;
+    }
+    let maximized = false;
+    try { maximized = localStorage.getItem(MAX_KEY) === '1'; } catch (e) { /* lagring ej tillgänglig */ }
+    applyMaximized(maximized);
+    maxBtn.addEventListener('click', function () {
+        maximized = !maximized;
+        try { localStorage.setItem(MAX_KEY, maximized ? '1' : '0'); } catch (e) { /* ignorera */ }
+        applyMaximized(maximized);
+    });
 
     panel.querySelector('#sbr-assistant-close').addEventListener('click', closePanel);
     sendBtn.addEventListener('click', handleSend);
