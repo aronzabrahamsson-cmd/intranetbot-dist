@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.14.0
+// @version      1.15.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -496,6 +496,37 @@
         .sbr-dark #sbr-dropzone:hover, .sbr-dark #sbr-dropzone.dragover { border-color: #eaeaea; background: #242424; }
         #sbr-assistant-bubble.sbr-dark { background: #242424; color: #eaeaea; border-color: #555; }
         #sbr-assistant-bubble.sbr-dark::after { background: #242424; border-color: #555; }
+
+        /* AGDA-påminnelse: stor pratbubbla mitt på skärmen (sista 5 dagarna i månaden). */
+        #sbr-agda-bubble {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            z-index: 1000000; width: 420px; max-width: calc(100vw - 32px); box-sizing: border-box;
+            padding: 26px 28px 22px; background: #fff; color: #000;
+            border: 2px solid #000; border-radius: 18px; box-shadow: 0 16px 48px rgba(0,0,0,.35);
+            font-family: ${FONT}; font-size: 16px; line-height: 1.5;
+            opacity: 1; transition: opacity .3s ease;
+        }
+        #sbr-agda-bubble::after {
+            content: ''; position: absolute; bottom: -12px; left: 50%; margin-left: -10px;
+            width: 20px; height: 20px; background: inherit;
+            border-right: 2px solid; border-bottom: 2px solid; border-color: inherit;
+            transform: rotate(45deg);
+        }
+        #sbr-agda-bubble.hide { opacity: 0; }
+        #sbr-agda-bubble .sbr-agda-title { font-size: 22px; font-weight: 700; margin: 0 0 8px; }
+        #sbr-agda-bubble p { margin: 0 0 10px; }
+        #sbr-agda-bubble a.sbr-agda-link { color: #1a3d7c; font-weight: 600; text-decoration: underline; }
+        #sbr-agda-bubble .sbr-agda-options { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+        #sbr-agda-bubble label { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 15px; }
+        #sbr-agda-bubble input[type=checkbox] { width: 18px; height: 18px; flex: 0 0 18px; cursor: pointer; }
+        #sbr-agda-close {
+            position: absolute; top: 10px; right: 12px; border: none; background: transparent;
+            font-size: 22px; line-height: 1; color: #999; cursor: pointer; padding: 4px 6px;
+        }
+        #sbr-agda-close:hover { color: #000; }
+        #sbr-agda-bubble.sbr-dark { background: #242424; color: #eaeaea; border-color: #555; color-scheme: dark; }
+        #sbr-agda-bubble.sbr-dark a.sbr-agda-link { color: #8fb4ff; }
+        #sbr-agda-bubble.sbr-dark #sbr-agda-close:hover { color: #fff; }
     `;
     document.head.appendChild(style);
 
@@ -925,8 +956,10 @@
     const darkToggle = panel.querySelector('#sbr-dark-toggle');
     function applyDarkMode(on) {
         panel.classList.toggle('sbr-dark', on);
-        const b = document.getElementById('sbr-assistant-bubble');
-        if (b) b.classList.toggle('sbr-dark', on);
+        ['sbr-assistant-bubble', 'sbr-agda-bubble'].forEach(function (id) {
+            const b = document.getElementById(id);
+            if (b) b.classList.toggle('sbr-dark', on);
+        });
     }
     let darkMode = false;
     try { darkMode = localStorage.getItem(DARK_KEY) === '1'; } catch (e) { /* lagring ej tillgänglig */ }
@@ -1545,10 +1578,81 @@
     ensureKey(false).then(refreshUpdatedTag);
     loadLiveStaff();
 
-    // Pratbubbla: visas i 3 sekunder, bara på startsidan (sbr.wiki/).
-    // Klick öppnar chatten.
+    // =========================================================================
+    // PRATBUBBLOR PÅ STARTSIDAN
+    // =========================================================================
+    // Sista 5 dagarna i månaden visas AGDA-påminnelsen i stället för
+    // "Hej!"-bubblan (om den inte är avstängd för månaden/dagen).
+    // Förhandsvisning när som helst: lägg till #agda i adressen.
     const isStartPage = location.pathname === '/' || location.pathname === '';
-    if (isStartPage) {
+
+    const AGDA_URL        = 'https://sbr-bankid.agdadrift.se/';
+    const AGDA_DONE_KEY   = 'sbr_agda_done_month';   // "2026-09" = klar denna månad
+    const AGDA_SNOOZE_KEY = 'sbr_agda_snooze_day';   // "2026-09-29" = pausad i dag
+    const AGDA_TIMEOUT_MS = 10000;
+
+    function ymd(d) {
+        return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    }
+    function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+    function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* ignorera */ } }
+
+    function agdaReminderDue() {
+        if (location.hash === '#agda') return true;
+        const now = new Date();
+        const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+        if (now.getDate() <= lastDay - 5) return false;
+        const today = ymd(now);
+        if (lsGet(AGDA_DONE_KEY) === today.slice(0, 7)) return false;
+        if (lsGet(AGDA_SNOOZE_KEY) === today) return false;
+        return true;
+    }
+
+    function showAgdaReminder() {
+        const box = document.createElement('div');
+        box.id = 'sbr-agda-bubble';
+        box.setAttribute('role', 'dialog');
+        box.setAttribute('aria-label', 'Påminnelse om tidrapportering');
+        box.innerHTML = `
+            <button id="sbr-agda-close" title="Stäng" aria-label="Stäng">×</button>
+            <p class="sbr-agda-title">Snart 🐔AGDA-dags 📆</p>
+            <p>Glöm inte att tidrapportera innan månadsslutet!</p>
+            <p><a class="sbr-agda-link" href="${AGDA_URL}" target="_blank" rel="noopener noreferrer">Länk till AGDA</a></p>
+            <div class="sbr-agda-options">
+                <label><input type="checkbox" data-agda="done"> Redan gjort 👍 påminn mig inte igen denna månad</label>
+                <label><input type="checkbox" data-agda="snooze"> Inte än, men jag ska 🫡</label>
+            </div>`;
+        if (darkMode) box.classList.add('sbr-dark');
+        document.body.appendChild(box);
+
+        let timer = null;
+        function close() {
+            clearTimeout(timer);
+            if (!box.isConnected) return;
+            box.classList.add('hide');
+            setTimeout(function () { box.remove(); }, 300);
+        }
+        // Stängs efter 10 s om inget görs. Pausas medan muspekaren är över
+        // bubblan, så man hinner läsa och klicka.
+        function startTimer() { clearTimeout(timer); timer = setTimeout(close, AGDA_TIMEOUT_MS); }
+        box.addEventListener('mouseenter', function () { clearTimeout(timer); });
+        box.addEventListener('mouseleave', startTimer);
+        box.querySelector('#sbr-agda-close').addEventListener('click', close);
+        box.querySelectorAll('input[type=checkbox]').forEach(function (cb) {
+            cb.addEventListener('change', function () {
+                if (!cb.checked) return;
+                const today = ymd(new Date());
+                if (cb.dataset.agda === 'done') lsSet(AGDA_DONE_KEY, today.slice(0, 7));
+                else lsSet(AGDA_SNOOZE_KEY, today);
+                box.querySelectorAll('input[type=checkbox]').forEach(o => { o.disabled = true; });
+                setTimeout(close, 600);   // kort stund så att bocken syns
+            });
+        });
+        startTimer();
+    }
+
+    // "Hej!"-bubblan: visas i 3 sekunder. Klick öppnar chatten.
+    function showGreetingBubble() {
         const bubble = document.createElement('div');
         bubble.id = 'sbr-assistant-bubble';
         bubble.textContent = 'Hej! Vill du ha hjälp? Klicka här!';
@@ -1563,6 +1667,11 @@
         bubble.addEventListener('click', function () { openPanel(); removeBubble(); });
         toggle.addEventListener('click', removeBubble);
         setTimeout(removeBubble, 3000);
+    }
+
+    if (isStartPage || location.hash === '#agda') {
+        if (agdaReminderDue()) showAgdaReminder();
+        else showGreetingBubble();
     }
 
 })();
