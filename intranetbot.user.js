@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.15.0
+// @version      1.16.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -248,9 +248,10 @@
         #sbr-assistant-toggle img { width: 100%; height: 100%; object-fit: contain; filter: invert(1); }
 
         #sbr-assistant-panel {
-            position: fixed; bottom: 100px; right: 24px; z-index: 999999;
+            --sbr-top: 0px;   /* underkant av sajtens fasta toppmeny (sätts av skriptet) */
+            position: fixed; bottom: 24px; right: 24px; z-index: 999999;
             width: 390px; max-width: calc(100vw - 32px);
-            height: 580px; max-height: calc(100vh - 150px);
+            height: 580px; max-height: calc(100vh - var(--sbr-top) - 24px - 8px);
             background: #fff; border: 1.5px solid #000; border-radius: 4px;
             box-shadow: 0 10px 34px rgba(0,0,0,.30);
             display: none; flex-direction: column; overflow: hidden;
@@ -258,7 +259,7 @@
         }
         #sbr-assistant-panel.open { display: flex; }
         /* Maximerad: hela fönstrets höjd (bredden behålls). */
-        #sbr-assistant-panel.maximized { top: 16px; bottom: 16px; height: auto; max-height: none; }
+        #sbr-assistant-panel.maximized { top: max(var(--sbr-top), 16px); bottom: 16px; height: auto; max-height: none; }
         /* Ljusa rullningslister i ljust läge (mörka sätts under Mörkt läge). */
         #sbr-assistant-panel { color-scheme: light; }
 
@@ -734,6 +735,18 @@
     function cleanupAnswer(text) {
         if (!text) return text;
         let s = text;
+        // Modellen läcker ibland sitt eget sökverktygs-anrop som text, t.ex.
+        // open_library_result{"document_id": "…", …}```]```  – ta bort det.
+        s = s.replace(/\b\w*library_result\s*\{[^{}]*\}/gi, ' ');
+        s = s.replace(/`{3}\s*[\[\]{}()]*\s*`{3}/g, ' ');
+        // Källnummer som klistrats direkt efter en länk eller ett ord: "…](url)0." / "Förmåner0."
+        s = s.replace(/(\]\([^)\s]+\))\d{1,3}(?:,\s*\d{1,3})*/g, '$1');
+        s = s.replace(/(\p{Ll}{3,})\d{1,3}(?:,\d{1,3})*(?=[\s.,;:!?)]|$)/gu, '$1');
+        // Slumpsträng sist i svaret (blandade versaler/gemener, t.ex. "ZGQgZsrc").
+        // Tas bara bort om den står ensam efter ett avslutat stycke och har minst 2 versaler.
+        s = s.replace(/([.!?:)])\s+(?=[A-Za-z0-9+/=]{5,20}\s*$)(?=\S*[a-z])(?=(?:\S*[A-Z]){2})[A-Za-z0-9+/=]+\s*$/, '$1');
+        // Rubriker/stycken som hamnat direkt efter skräpet på samma rad.
+        s = s.replace(/[ \t]+(#{1,6} )/g, '\n\n$1');
         // Ta bort långa svansar av }]}, ]}], mellanslag och liknande skräp i slutet.
         s = s.replace(/[\s\]\}\)]*(?:[\]\}][\s\]\}\)]*){6,}$/g, '');
         // Ta bort en avslutande referensrad som "65,66" eller "65,66,67,71".
@@ -782,6 +795,8 @@
                     // Spara/uppdatera konversations-ID för nästa fråga.
                     if (data.conversation_id) { conversationId = data.conversation_id; saveSession(); }
 
+                    // Råsvaret loggas (nivå "debug") för felsökning i webbläsarens konsol.
+                    console.debug('[SBR-assistent] råsvar från Mistral:', data);
                     const answer = extractAnswer(data);
                     resolve(answer);
                 },
@@ -1527,8 +1542,34 @@
 
 
     // Öppna/stäng rutan när man klickar på den runda ikonen.
-    function openPanel()  { panel.classList.add('open');  input.focus(); }
-    function closePanel() { panel.classList.remove('open'); }
+    // Den runda ikonen döljs medan rutan är öppen (aldrig båda samtidigt).
+    function openPanel()  { updateTopOffset(); panel.classList.add('open'); toggle.style.display = 'none'; input.focus(); }
+    function closePanel() { panel.classList.remove('open'); toggle.style.display = ''; }
+
+    // Rutan får aldrig täcka sajtens svarta toppmeny: mät underkanten av de
+    // menyer/sidhuvuden som ligger överst (även WordPress adminlist) och
+    // använd den som övre gräns. Mäts om vid scroll och fönsterstorlek.
+    function updateTopOffset() {
+        const vw = window.innerWidth;
+        const cands = Array.from(document.querySelectorAll(
+            '#wpadminbar, header, nav, .ubermenu, [class*="header"], [id*="header"], [class*="navbar"], [class*="topbar"]'))
+            .filter(el => !panel.contains(el) && el !== toggle)
+            .map(el => el.getBoundingClientRect())
+            .filter(r => r.width >= vw * 0.6 && r.height >= 20 && r.height <= 300 && r.top < 200)
+            .sort((a, b) => a.top - b.top);
+        let bottom = 0;
+        for (const r of cands) {
+            if (r.top <= bottom + 4 && r.bottom > bottom) bottom = r.bottom;
+        }
+        panel.style.setProperty('--sbr-top', Math.max(0, Math.round(bottom)) + 'px');
+    }
+    let topRaf = 0;
+    function scheduleTopOffset() {
+        if (!panel.classList.contains('open') || topRaf) return;
+        topRaf = requestAnimationFrame(function () { topRaf = 0; updateTopOffset(); });
+    }
+    window.addEventListener('scroll', scheduleTopOffset, { passive: true });
+    window.addEventListener('resize', scheduleTopOffset);
 
     toggle.addEventListener('click', function () {
         if (panel.classList.contains('open')) closePanel();
@@ -1615,7 +1656,7 @@
         box.setAttribute('aria-label', 'Påminnelse om tidrapportering');
         box.innerHTML = `
             <button id="sbr-agda-close" title="Stäng" aria-label="Stäng">×</button>
-            <p class="sbr-agda-title">Snart 🐔AGDA-dags 📆</p>
+            <p class="sbr-agda-title">🐔 Snart AGDA-dags 📆</p>
             <p>Glöm inte att tidrapportera innan månadsslutet!</p>
             <p><a class="sbr-agda-link" href="${AGDA_URL}" target="_blank" rel="noopener noreferrer">Länk till AGDA</a></p>
             <div class="sbr-agda-options">
