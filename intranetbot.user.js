@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.16.0
+// @version      1.17.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -507,12 +507,6 @@
             font-family: ${FONT}; font-size: 16px; line-height: 1.5;
             opacity: 1; transition: opacity .3s ease;
         }
-        #sbr-agda-bubble::after {
-            content: ''; position: absolute; bottom: -12px; left: 50%; margin-left: -10px;
-            width: 20px; height: 20px; background: inherit;
-            border-right: 2px solid; border-bottom: 2px solid; border-color: inherit;
-            transform: rotate(45deg);
-        }
         #sbr-agda-bubble.hide { opacity: 0; }
         #sbr-agda-bubble .sbr-agda-title { font-size: 22px; font-weight: 700; margin: 0 0 8px; }
         #sbr-agda-bubble p { margin: 0 0 10px; }
@@ -569,7 +563,8 @@
         <div id="sbr-settings-view" class="sbr-view">
             <div id="sbr-settings-general">
                 <div class="sbr-settings-section">
-                    <h3>Utseende</h3>
+                    <h3>Allmänt</h3>
+                    <label class="sbr-check"><input type="checkbox" id="sbr-agda-toggle"> AGDA-påminnelser i slutet av månaden</label>
                     <label class="sbr-check"><input type="checkbox" id="sbr-dark-toggle"> Mörkt läge</label>
                 </div>
             </div>
@@ -969,6 +964,18 @@
     // =========================================================================
     const DARK_KEY   = 'sbr_dark_mode';
     const darkToggle = panel.querySelector('#sbr-dark-toggle');
+
+    // AGDA-påminnelser på/av (på som standard). Sparas lokalt i webbläsaren.
+    const AGDA_OFF_KEY = 'sbr_agda_off';
+    const agdaToggle   = panel.querySelector('#sbr-agda-toggle');
+    try { agdaToggle.checked = localStorage.getItem(AGDA_OFF_KEY) !== '1'; } catch (e) { agdaToggle.checked = true; }
+    agdaToggle.addEventListener('change', function () {
+        try { localStorage.setItem(AGDA_OFF_KEY, agdaToggle.checked ? '0' : '1'); } catch (e) { /* ignorera */ }
+        if (!agdaToggle.checked) {
+            const open = document.getElementById('sbr-agda-bubble');
+            if (open) open.remove();
+        }
+    });
     function applyDarkMode(on) {
         panel.classList.toggle('sbr-dark', on);
         ['sbr-assistant-bubble', 'sbr-agda-bubble'].forEach(function (id) {
@@ -1624,7 +1631,8 @@
     // =========================================================================
     // Sista 5 dagarna i månaden visas AGDA-påminnelsen i stället för
     // "Hej!"-bubblan (om den inte är avstängd för månaden/dagen).
-    // Förhandsvisning när som helst: lägg till #agda i adressen.
+    // Förhandsvisning när som helst: lägg till #agda i adressen
+    // (#agda-sista visar hur den ser ut på månadens sista veckodag).
     const isStartPage = location.pathname === '/' || location.pathname === '';
 
     const AGDA_URL        = 'https://sbr-bankid.agdadrift.se/';
@@ -1638,8 +1646,18 @@
     function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
     function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* ignorera */ } }
 
+    const AGDA_PREVIEW = location.hash === '#agda' || location.hash === '#agda-sista';
+
+    // Månadens sista vardag (mån–fre). Helgdagar räknas inte bort.
+    function isLastWeekdayOfMonth(d) {
+        const last = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+        while (last.getDay() === 0 || last.getDay() === 6) last.setDate(last.getDate() - 1);
+        return d.getDate() === last.getDate();
+    }
+
     function agdaReminderDue() {
-        if (location.hash === '#agda') return true;
+        if (AGDA_PREVIEW) return true;
+        if (lsGet('sbr_agda_off') === '1') return false;   // avstängt under ⚙️
         const now = new Date();
         const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
         if (now.getDate() <= lastDay - 5) return false;
@@ -1650,6 +1668,8 @@
     }
 
     function showAgdaReminder() {
+        // Sista vardagen: stängs inte automatiskt och har eget svar på "Inte än".
+        const lastWeekday = location.hash === '#agda-sista' || (!AGDA_PREVIEW && isLastWeekdayOfMonth(new Date()));
         const box = document.createElement('div');
         box.id = 'sbr-agda-bubble';
         box.setAttribute('role', 'dialog');
@@ -1657,10 +1677,10 @@
         box.innerHTML = `
             <button id="sbr-agda-close" title="Stäng" aria-label="Stäng">×</button>
             <p class="sbr-agda-title">🐔 Snart AGDA-dags 📆</p>
-            <p>Glöm inte att tidrapportera innan månadsslutet!</p>
+            <p class="sbr-agda-text">Glöm inte att tidrapportera innan månadsslutet!</p>
             <p><a class="sbr-agda-link" href="${AGDA_URL}" target="_blank" rel="noopener noreferrer">Länk till AGDA</a></p>
             <div class="sbr-agda-options">
-                <label><input type="checkbox" data-agda="done"> Redan gjort 👍 påminn mig inte igen denna månad</label>
+                <label><input type="checkbox" data-agda="done"> Redan gjort 👍</label>
                 <label><input type="checkbox" data-agda="snooze"> Inte än, men jag ska 🫡</label>
             </div>`;
         if (darkMode) box.classList.add('sbr-dark');
@@ -1675,7 +1695,7 @@
         }
         // Stängs efter 10 s om inget görs. Pausas medan muspekaren är över
         // bubblan, så man hinner läsa och klicka.
-        function startTimer() { clearTimeout(timer); timer = setTimeout(close, AGDA_TIMEOUT_MS); }
+        function startTimer() { if (lastWeekday) return; clearTimeout(timer); timer = setTimeout(close, AGDA_TIMEOUT_MS); }
         box.addEventListener('mouseenter', function () { clearTimeout(timer); });
         box.addEventListener('mouseleave', startTimer);
         box.querySelector('#sbr-agda-close').addEventListener('click', close);
@@ -1686,6 +1706,12 @@
                 if (cb.dataset.agda === 'done') lsSet(AGDA_DONE_KEY, today.slice(0, 7));
                 else lsSet(AGDA_SNOOZE_KEY, today);
                 box.querySelectorAll('input[type=checkbox]').forEach(o => { o.disabled = true; });
+                if (lastWeekday && cb.dataset.agda === 'snooze') {
+                    // Sista vardagen: ingen paus till i morgon – påminn om att det är i dag.
+                    box.querySelector('.sbr-agda-title').textContent = 'Bra, idag är månadens sista veckodag!';
+                    box.querySelectorAll('.sbr-agda-text, .sbr-agda-options').forEach(el => el.remove());
+                    return;   // ligger kvar tills den stängs
+                }
                 setTimeout(close, 600);   // kort stund så att bocken syns
             });
         });
