@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.17.0
+// @version      1.18.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -12,6 +12,10 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_getResourceText
+// @grant        unsafeWindow
+// @require      https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js
+// @resource     pdfworker https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js
 // @connect      api.mistral.ai
 // @run-at       document-idle
 // ==/UserScript==
@@ -345,15 +349,31 @@
         .sbr-subview.active { display: flex; }
 
         /* Drag-and-drop */
-        #sbr-dropzone {
+        #sbr-dropzone, #sbr-bolag-drop {
             border: 2px dashed #bbb; border-radius: 10px; padding: 26px 16px;
             display: flex; flex-direction: column; align-items: center; gap: 6px;
             text-align: center; cursor: pointer; color: #444; font-size: 14px; font-weight: 600;
             transition: border-color .15s ease, background .15s ease;
         }
-        #sbr-dropzone .sbr-dropzone-sub { font-size: 12px; font-weight: 400; color: #999; }
-        #sbr-dropzone:hover { border-color: #000; }
-        #sbr-dropzone.dragover { border-color: #000; background: #f2f2f2; }
+        #sbr-dropzone .sbr-dropzone-sub, #sbr-bolag-drop .sbr-dropzone-sub { font-size: 12px; font-weight: 400; color: #999; }
+        #sbr-dropzone:hover, #sbr-bolag-drop:hover { border-color: #000; }
+        #sbr-dropzone.dragover, #sbr-bolag-drop.dragover { border-color: #000; background: #f2f2f2; }
+
+        /* Bolagsmöte */
+        #sbr-bolag-paste summary { font-size: 12px; color: #444; cursor: pointer; }
+        #sbr-bolag-text { min-height: 90px; resize: vertical; margin-top: 8px; }
+        #sbr-bolag-preview {
+            border: 1.5px solid #ccc; border-radius: 8px; padding: 10px 12px; max-height: 300px; overflow-y: auto;
+            font-size: 13px; line-height: 1.5; color: #000; background: #fff; outline: none;
+        }
+        #sbr-bolag-preview:focus { border-color: #000; }
+        #sbr-bolag-preview h2 { font-size: 16px; margin: 0 0 8px; }
+        #sbr-bolag-preview h3 { font-size: 14px; margin: 12px 0 4px; }
+        #sbr-bolag-preview p { margin: 0 0 6px; }
+        #sbr-bolag-preview mark { background: #ffe08a; }
+        .sbr-dark #sbr-bolag-preview { background: #242424; color: #eaeaea; border-color: #444; }
+        .sbr-dark #sbr-bolag-preview mark { background: #7a5a00; color: #fff; }
+        .sbr-dark #sbr-bolag-drop { border-color: #555; color: #ccc; }
         .sbr-settings-section { display: flex; flex-direction: column; gap: 8px; }
         .sbr-settings-section h3 {
             margin: 0; font-size: 13px; font-weight: 700; text-transform: uppercase;
@@ -585,6 +605,7 @@
                 <div id="sbr-subtabs">
                     <button class="sbr-subtab active" data-sub="data">Data</button>
                     <button class="sbr-subtab" data-sub="api">API</button>
+                    <button class="sbr-subtab" data-sub="bolag">Bolagsmöte</button>
                 </div>
                 <button id="sbr-settings-lock" title="Lås inställningarna">🔒 Lås</button>
             </div>
@@ -622,6 +643,48 @@
                     </ul>
                     <button class="sbr-btn" id="sbr-publish-btn" disabled>Publicera till Mistral</button>
                     <ul class="sbr-result" id="sbr-publish-result"></ul>
+                </div>
+            </div>
+
+            <div id="sbr-sub-bolag" class="sbr-subview" style="gap:0">
+                <div class="sbr-step active" id="sbr-bstep-1">
+                    <div class="sbr-step-head"><span class="sbr-step-num">1</span><h3>Släpp bildspelet</h3></div>
+                    <ul class="sbr-step-list">
+                        <li>Dra PDF:en från bolagsmötet hit</li>
+                        <li>Bilderna läses och sammanfattas automatiskt (ca 1 min)</li>
+                    </ul>
+                    <div id="sbr-bolag-drop">
+                        <span>Släpp PDF här</span>
+                        <span class="sbr-dropzone-sub">eller klicka för att välja fil</span>
+                    </div>
+                    <input type="file" id="sbr-bolag-file" accept=".pdf,application/pdf" style="display:none">
+                    <details id="sbr-bolag-paste">
+                        <summary>…eller klistra in text i stället</summary>
+                        <textarea id="sbr-bolag-text" class="sbr-input" placeholder="Klistra in text från bildspelet"></textarea>
+                        <button class="sbr-btn secondary" id="sbr-bolag-textbtn" style="margin-top:8px">Sammanfatta texten</button>
+                    </details>
+                    <ul class="sbr-result" id="sbr-bolag-progress"></ul>
+                </div>
+                <div class="sbr-step-arrow">↓</div>
+                <div class="sbr-step locked" id="sbr-bstep-2">
+                    <div class="sbr-step-head"><span class="sbr-step-num">2</span><h3>Granska</h3></div>
+                    <ul class="sbr-step-list">
+                        <li>Kontrollera datumet och texten – du kan redigera direkt i rutan</li>
+                        <li>Gulmarkerade ord kan vara namn – ta bort dem</li>
+                    </ul>
+                    <label class="sbr-field-label" for="sbr-bolag-date">Mötesdatum</label>
+                    <input type="date" id="sbr-bolag-date" class="sbr-input">
+                    <div id="sbr-bolag-preview" contenteditable="true"></div>
+                </div>
+                <div class="sbr-step-arrow">↓</div>
+                <div class="sbr-step locked" id="sbr-bstep-3">
+                    <div class="sbr-step-head"><span class="sbr-step-num">3</span><h3>Infoga på Bolagsinfo</h3></div>
+                    <ul class="sbr-step-list">
+                        <li>Läggs sist på sidan, under befintlig text</li>
+                        <li>Klicka sedan <strong>Spara</strong> i WordPress</li>
+                    </ul>
+                    <button class="sbr-btn" id="sbr-bolag-insert" disabled>Infoga på Bolagsinfo</button>
+                    <ul class="sbr-result" id="sbr-bolag-insert-result"></ul>
                 </div>
             </div>
 
@@ -1004,7 +1067,8 @@
     const subtabs = panel.querySelectorAll('.sbr-subtab');
     const subviews = {
         data: panel.querySelector('#sbr-sub-data'),
-        api:  panel.querySelector('#sbr-sub-api')
+        api:  panel.querySelector('#sbr-sub-api'),
+        bolag: panel.querySelector('#sbr-sub-bolag')
     };
     subtabs.forEach(function (st) {
         st.addEventListener('click', function () {
@@ -1625,6 +1689,330 @@
     setFace('standard', 'Redo att hjälpa till');
     ensureKey(false).then(refreshUpdatedTag);
     loadLiveStaff();
+
+    // =========================================================================
+    // BOLAGSMÖTE → SAMMANFATTNING PÅ BOLAGSINFO (Inställningar → Bolagsmöte)
+    // =========================================================================
+    // 1. PDF:en läses i webbläsaren med pdf.js. Bilder med textlager används
+    //    direkt; övriga bilder (platta bilder) renderas och läses med Mistral OCR.
+    // 2. Mistral skriver en sammanfattning: ett kort stycke (3–4 meningar) per
+    //    avsnitt, utan personnamn.
+    // 3. Admin granskar och klickar "Infoga": texten läggs sist i innehållsrutan
+    //    på Bolagsinfo (öppnas automatiskt om man står på en annan sida), och
+    //    admin klickar Spara i WordPress.
+    const BOLAG_EDIT_URL   = 'https://sbr.wiki/bolagsinfo/post.php?post=109&action=edit';
+    const BOLAG_PENDING    = 'sbr_bolag_pending';
+    const OCR_MODEL        = 'mistral-ocr-latest';
+    const SUMMARY_MODEL    = 'mistral-medium-latest';
+    const MONTHS_SV        = ['januari','februari','mars','april','maj','juni','juli','augusti','september','oktober','november','december'];
+
+    const bolagDrop     = panel.querySelector('#sbr-bolag-drop');
+    const bolagFile     = panel.querySelector('#sbr-bolag-file');
+    const bolagProgress = panel.querySelector('#sbr-bolag-progress');
+    const bolagDate     = panel.querySelector('#sbr-bolag-date');
+    const bolagPreview  = panel.querySelector('#sbr-bolag-preview');
+    const bolagInsert   = panel.querySelector('#sbr-bolag-insert');
+    const bolagInsertRes = panel.querySelector('#sbr-bolag-insert-result');
+    const bsteps = [1, 2, 3].map(n => panel.querySelector('#sbr-bstep-' + n));
+    function setBStep(n, state) { const el = bsteps[n - 1]; el.classList.remove('active', 'done', 'locked'); el.classList.add(state); }
+
+    function isBolagEditPage() {
+        return /\/post\.php$/.test(location.pathname) && new URLSearchParams(location.search).get('post') === '109';
+    }
+
+    // --- pdf.js (laddas via @require; workern skapas från @resource som blob) ---
+    let pdfjsReady = null;
+    function getPdfjs() {
+        if (!pdfjsReady) {
+            pdfjsReady = Promise.resolve().then(function () {
+                const lib = (typeof pdfjsLib !== 'undefined' && pdfjsLib) || window.pdfjsLib || (typeof unsafeWindow !== 'undefined' && unsafeWindow.pdfjsLib);
+                if (!lib) throw new Error('PDF-läsaren kunde inte laddas. Uppdatera skriptet i Tampermonkey.');
+                const workerCode = GM_getResourceText('pdfworker');
+                lib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([workerCode], { type: 'text/javascript' }));
+                return lib;
+            });
+        }
+        return pdfjsReady;
+    }
+
+    // Läser PDF:en: returnerar [{ page, text, image }] (image = JPEG data-URL om textlager saknas).
+    async function readPdf(arrayBuffer, onProgress) {
+        const lib = await getPdfjs();
+        const doc = await lib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
+        const pages = [];
+        for (let i = 1; i <= doc.numPages; i++) {
+            onProgress('Läser bild ' + i + ' av ' + doc.numPages + '…');
+            const pg = await doc.getPage(i);
+            const tc = await pg.getTextContent();
+            const text = tc.items.map(it => it.str + (it.hasEOL ? '\n' : ' ')).join('').replace(/[ \t]+/g, ' ').trim();
+            let image = null;
+            if (text.length < 200) {   // lite eller ingen text → rendera för OCR
+                const vp0 = pg.getViewport({ scale: 1 });
+                const vp = pg.getViewport({ scale: Math.min(2, 1400 / vp0.width) });
+                const c = document.createElement('canvas');
+                c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+                await pg.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+                image = c.toDataURL('image/jpeg', 0.8);
+            }
+            pages.push({ page: i, text: text, image: image });
+        }
+        return pages;
+    }
+
+    async function ocrImage(dataUrl) {
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                const r = await mistralRequest('POST', 'https://api.mistral.ai/v1/ocr',
+                    { model: OCR_MODEL, document: { type: 'image_url', image_url: dataUrl } });
+                return ((r && r.pages) || []).map(p => p.markdown || '').join('\n')
+                    .replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim();
+            } catch (e) {
+                if (!/HTTP (429|5\d\d)/.test(e.message) || attempt === 2) throw e;
+                await sleep(2000 * (attempt + 1));
+            }
+        }
+        return '';
+    }
+
+    // Kör OCR på bilderna, max 4 samtidigt.
+    async function ocrPages(pages, onProgress) {
+        const todo = pages.filter(p => p.image);
+        let done = 0, next = 0;
+        async function worker() {
+            while (next < todo.length) {
+                const p = todo[next++];
+                const t = await ocrImage(p.image);
+                p.text = [p.text, t].filter(Boolean).join('\n');
+                onProgress('Läser text i bilderna… ' + (++done) + ' av ' + todo.length);
+            }
+        }
+        await Promise.all([worker(), worker(), worker(), worker()]);
+    }
+
+    // Hittar mötesdatum i filnamn/första bilderna: "30 september 2026", "30 september -26", "260930".
+    function detectMeetingDate(texts) {
+        const re = new RegExp('(\\d{1,2})(?::?e)?\\s+(' + MONTHS_SV.join('|') + ')\\b[\\s,–-]*(\\d{4}|\\d{2}(?!\\d))?', 'i');
+        for (const t of texts) {
+            const s = (t || '').replace(/[_]+/g, ' ');
+            const m = s.match(re);
+            if (m) {
+                let y = m[3] ? parseInt(m[3], 10) : new Date().getFullYear();
+                if (y < 100) y += 2000;
+                return new Date(y, MONTHS_SV.indexOf(m[2].toLowerCase()), parseInt(m[1], 10));
+            }
+            const c = s.match(/\b(2\d)(0[1-9]|1[0-2])([0-2]\d|3[01])\b/);
+            if (c) return new Date(2000 + parseInt(c[1], 10), parseInt(c[2], 10) - 1, parseInt(c[3], 10));
+        }
+        return new Date();
+    }
+    function dateHeading(d) { return 'Bolagsmöte ' + d.getDate() + ' ' + MONTHS_SV[d.getMonth()] + ' ' + d.getFullYear(); }
+
+    const SUMMARY_PROMPT = [
+        'Du sammanfattar bildspel från SBR:s bolagsmöten för intranätet.',
+        'Regler:',
+        '- Skriv på svenska, sakligt och lättläst.',
+        '- Dela upp i de tydliga avsnitt som mötet innehåller (ett nytt avsnitt börjar ofta med en rubrikbild).',
+        '- Varje avsnitt får en kort rubrik och ETT stycke på 3–4 meningar.',
+        '- Nämn ALDRIG personers namn – inte föredragande, deltagare, gruppmedlemmar eller jubilarer. Skriv roll eller funktion om det behövs (t.ex. "projektledaren", "arbetsgruppen").',
+        '- Ta bara med sakinnehåll. Hoppa över logotyper, rena stämningsbilder, fristående citat och personliga hälsningar (t.ex. födelsedagar).',
+        '- Hitta inte på något som inte står i underlaget. Behåll viktiga datum, siffror och beslut.',
+        '- Svara ENDAST med HTML i formen <h3>Rubrik</h3><p>Stycke</p>, upprepat per avsnitt. Inga andra taggar, ingen inledning eller avslutning.'
+    ].join('\n');
+
+    async function summarize(pages, heading) {
+        const material = pages.filter(p => p.text).map(p => '=== Bild ' + p.page + ' ===\n' + p.text).join('\n\n');
+        if (material.replace(/\s/g, '').length < 50) throw new Error('Hittade nästan ingen text i bildspelet.');
+        const r = await mistralRequest('POST', 'https://api.mistral.ai/v1/chat/completions', {
+            model: SUMMARY_MODEL, temperature: 0.2,
+            messages: [
+                { role: 'system', content: SUMMARY_PROMPT },
+                { role: 'user', content: 'Möte: ' + heading + '\n\nUnderlag (text per bild):\n\n' + material }
+            ]
+        });
+        let c = r && r.choices && r.choices[0] && r.choices[0].message && r.choices[0].message.content;
+        if (Array.isArray(c)) c = c.map(x => (typeof x === 'string' ? x : (x && x.text) || '')).join('');
+        if (!c || !c.trim()) throw new Error('Mistral returnerade ingen sammanfattning.');
+        return sanitizeSummary(c);
+    }
+
+    // Tillåter bara rubriker/stycken/enkel formatering. Markdown-svar konverteras.
+    function sanitizeSummary(raw) {
+        let html = raw.replace(/^```(?:html)?\s*|\s*```$/g, '').trim();
+        if (!/<(h\d|p)\b/i.test(html)) html = renderMarkdown(html);
+        const doc = new DOMParser().parseFromString('<div>' + html + '</div>', 'text/html');
+        const ALLOWED = { H3: 1, P: 1, STRONG: 1, EM: 1, UL: 1, OL: 1, LI: 1, BR: 1 };
+        (function clean(node) {
+            Array.from(node.childNodes).forEach(function (ch) {
+                if (ch.nodeType !== 1) return;
+                clean(ch);
+                if (/^H[1-6]$/.test(ch.tagName) && ch.tagName !== 'H3') {
+                    const h = doc.createElement('h3'); h.innerHTML = ch.innerHTML; ch.replaceWith(h); return;
+                }
+                if (!ALLOWED[ch.tagName]) { ch.replaceWith(...Array.from(ch.childNodes)); return; }
+                Array.from(ch.attributes).forEach(a => ch.removeAttribute(a.name));
+            });
+        })(doc.body.firstChild);
+        return doc.body.firstChild.innerHTML.trim();
+    }
+
+    // Markerar kända medarbetarnamn (från Mina kollegor) så att admin kan ta bort dem.
+    function flagNames(html) {
+        const words = new Set();
+        (peopleRecords || []).forEach(function (r) {
+            const parts = (r.name || '').split(/\s+/).filter(w => w.length >= 3);
+            parts.forEach(w => words.add(w));
+        });
+        if (!words.size) return { html: html, count: 0 };
+        const esc = Array.from(words).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+        const re = new RegExp('(?<![\\p{L}])(' + esc.join('|') + ')(?![\\p{L}])', 'gu');
+        let count = 0;
+        const doc = new DOMParser().parseFromString('<div>' + html + '</div>', 'text/html');
+        const walker = doc.createTreeWalker(doc.body.firstChild, NodeFilter.SHOW_TEXT);
+        const nodes = []; while (walker.nextNode()) nodes.push(walker.currentNode);
+        nodes.forEach(function (n) {
+            if (!re.test(n.nodeValue)) return;
+            re.lastIndex = 0;
+            const span = doc.createElement('span');
+            span.innerHTML = n.nodeValue.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                .replace(re, function (m) { count++; return '<mark>' + m + '</mark>'; });
+            n.replaceWith(...Array.from(span.childNodes));
+        });
+        return { html: doc.body.firstChild.innerHTML, count: count };
+    }
+
+    function toDateInput(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+    function fromDateInput(v) { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v || ''); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : new Date(); }
+
+    function renderBolagPreview(sectionsHtml) {
+        const flagged = flagNames(sectionsHtml);
+        bolagPreview.innerHTML = '<h2>' + dateHeading(fromDateInput(bolagDate.value)) + '</h2>' + flagged.html;
+        return flagged.count;
+    }
+    bolagDate.addEventListener('change', function () {
+        const h = bolagPreview.querySelector('h2');
+        if (h) h.textContent = dateHeading(fromDateInput(bolagDate.value));
+    });
+
+    async function runBolag(getPages, fileName) {
+        if (!getActiveKey()) await ensureKey(true);
+        if (!getActiveKey()) { setResult(bolagProgress, [{ kind: 'err', text: 'Ingen API-nyckel tillgänglig.' }]); return; }
+        const rows = []; const show = () => setResult(bolagProgress, rows);
+        const step = t => { const r = { kind: 'wait', text: t }; rows.push(r); show(); return r; };
+        setBStep(2, 'locked'); setBStep(3, 'locked'); bolagInsert.disabled = true; setResult(bolagInsertRes, []);
+        try {
+            let r = step('Läser bildspelet…');
+            const pages = await getPages(t => { r.text = t; show(); });
+            r.kind = 'ok'; r.text = pages.length + ' bilder lästa';
+            if (pages.some(p => p.image)) {
+                r = step('Läser text i bilderna…');
+                await ocrPages(pages, t => { r.text = t; show(); });
+                r.kind = 'ok'; r.text = 'Text i bilderna läst';
+            }
+            const date = detectMeetingDate([fileName].concat(pages.slice(0, 3).map(p => p.text)));
+            bolagDate.value = toDateInput(date);
+            r = step('Mistral sammanfattar…');
+            await loadLiveStaff();
+            const html = await summarize(pages, dateHeading(date));
+            const flagged = renderBolagPreview(html);
+            r.kind = 'ok'; r.text = 'Sammanfattning klar – granska nedan';
+            if (flagged) rows.push({ kind: 'warn', text: flagged + ' möjliga namn är gulmarkerade' });
+            show();
+            setBStep(1, 'done'); setBStep(2, 'active'); setBStep(3, 'active'); bolagInsert.disabled = false;
+        } catch (e) {
+            const last = rows[rows.length - 1]; if (last && last.kind === 'wait') last.kind = 'err';
+            rows.push({ kind: 'err', text: e.message }); show();
+        }
+    }
+
+    function handleBolagFile(file) {
+        if (!file) return;
+        if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') {
+            setResult(bolagProgress, [{ kind: 'err', text: 'Välj en PDF-fil.' }]); return;
+        }
+        runBolag(async function (onProgress) { return readPdf(await file.arrayBuffer(), onProgress); }, file.name);
+    }
+    bolagDrop.addEventListener('click', () => bolagFile.click());
+    bolagFile.addEventListener('change', function () { handleBolagFile(bolagFile.files && bolagFile.files[0]); bolagFile.value = ''; });
+    ['dragenter', 'dragover'].forEach(ev => bolagDrop.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); bolagDrop.classList.add('dragover'); }));
+    ['dragleave', 'dragend'].forEach(ev => bolagDrop.addEventListener(ev, e => { e.preventDefault(); bolagDrop.classList.remove('dragover'); }));
+    bolagDrop.addEventListener('drop', function (e) {
+        e.preventDefault(); e.stopPropagation(); bolagDrop.classList.remove('dragover');
+        handleBolagFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]);
+    });
+    panel.querySelector('#sbr-bolag-textbtn').addEventListener('click', function () {
+        const t = panel.querySelector('#sbr-bolag-text').value.trim();
+        if (!t) return;
+        runBolag(async () => [{ page: 1, text: t, image: null }], '');
+    });
+
+    // Färdig HTML för sidan: rubrik + avsnitt, utan markeringar.
+    function finalBolagHtml() {
+        const clone = bolagPreview.cloneNode(true);
+        clone.querySelectorAll('mark').forEach(m => m.replaceWith(...Array.from(m.childNodes)));
+        const h = clone.querySelector('h2'); if (h) h.remove();
+        return '<h2>' + dateHeading(fromDateInput(bolagDate.value)) + '</h2>\n' + sanitizeSummary(clone.innerHTML);
+    }
+
+    // Lägger till HTML sist i ACF-innehållsrutan (TinyMCE "Visuellt" eller "Code").
+    function insertIntoBolagsinfo(html) {
+        const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        const ed = w.tinymce && w.tinymce.get && w.tinymce.get('acf_content');
+        if (ed && !ed.isHidden()) {
+            ed.setContent(ed.getContent() + '\n' + html);
+            ed.save();
+            ed.fire('change');
+            const last = ed.getBody().lastElementChild;
+            if (last) { ed.selection.select(last); ed.selection.collapse(false); last.scrollIntoView({ block: 'center' }); }
+        } else {
+            const ta = document.getElementById('acf_content');
+            if (!ta) return false;
+            ta.value = ta.value.replace(/\s*$/, '') + '\n\n' + html;
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+            ta.dispatchEvent(new Event('change', { bubbles: true }));
+            ta.scrollTop = ta.scrollHeight;
+        }
+        const changed = document.getElementById('_acf_changed');
+        if (changed) changed.value = '1';
+        return true;
+    }
+
+    bolagInsert.addEventListener('click', function () {
+        const html = finalBolagHtml();
+        if (isBolagEditPage()) {
+            const ok = insertIntoBolagsinfo(html);
+            setResult(bolagInsertRes, ok
+                ? [{ kind: 'ok', text: 'Infogat sist i texten. Granska och klicka Spara uppe till höger.' }]
+                : [{ kind: 'err', text: 'Hittade inte innehållsrutan på sidan.' }]);
+            if (ok) setBStep(3, 'done');
+        } else {
+            // Öppna Bolagsinfo; sammanfattningen infogas automatiskt där.
+            GM_setValue(BOLAG_PENDING, JSON.stringify({ html: html, at: Date.now() }));
+            location.href = BOLAG_EDIT_URL;
+        }
+    });
+
+    // På Bolagsinfo: infoga en väntande sammanfattning när redigeraren är redo.
+    if (isBolagEditPage()) {
+        let pending = null;
+        try { pending = JSON.parse(GM_getValue(BOLAG_PENDING, '') || 'null'); } catch (e) { pending = null; }
+        if (pending && Date.now() - pending.at < 30 * 60 * 1000) {
+            const started = Date.now();
+            (function tryInsert() {
+                const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+                const ready = (w.tinymce && w.tinymce.get && w.tinymce.get('acf_content') && w.tinymce.get('acf_content').initialized) ||
+                              (document.getElementById('acf_content') && Date.now() - started > 8000);
+                if (!ready && Date.now() - started < 30000) { setTimeout(tryInsert, 500); return; }
+                GM_setValue(BOLAG_PENDING, '');
+                const ok = insertIntoBolagsinfo(pending.html);
+                addMessage(renderMarkdown(ok
+                    ? 'Sammanfattningen av bolagsmötet är infogad sist på sidan. Granska texten och klicka **Spara** uppe till höger.'
+                    : 'Jag hittade inte innehållsrutan på Bolagsinfo, så sammanfattningen kunde inte infogas.'), 'bot', { html: true, noSave: true });
+                openPanel();
+            })();
+        } else if (pending) {
+            GM_setValue(BOLAG_PENDING, '');
+        }
+    }
 
     // =========================================================================
     // PRATBUBBLOR PÅ STARTSIDAN
