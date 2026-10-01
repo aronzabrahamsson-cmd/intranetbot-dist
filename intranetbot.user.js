@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.20.0
+// @version      1.20.1
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -474,14 +474,36 @@
         #sbr-key-status {
             font-size: 12px; color: #1a3d7c; min-height: 16px; line-height: 1.5;
         }
-        #sbr-log-view {
-            margin: 10px 0 0; padding: 10px; border: 1.5px solid #e6e6e6; border-radius: 8px;
-            background: #fafafa; font-family: ${FONT}; font-size: 11px; line-height: 1.5;
-            color: #333; white-space: pre-wrap; word-break: break-word;
-            max-height: 240px; overflow-y: auto;
+        /* Fellogg som eget fönster (flyter ovanpå panelen) */
+        #sbr-logwin {
+            position: fixed; bottom: 24px; right: 434px; z-index: 1000000;
+            width: 460px; max-width: calc(100vw - 32px);
+            height: 420px; max-height: calc(100vh - 48px);
+            background: #fff; border: 1.5px solid #000; border-radius: 4px;
+            box-shadow: 0 10px 34px rgba(0,0,0,.30);
+            display: flex; flex-direction: column; overflow: hidden;
+            font-family: ${FONT};
         }
-        .sbr-dark #sbr-log-view { background: #242424; border-color: #444; color: #b5b5b5; }
-        #sbr-log-status { font-size: 12px; color: #1a3d7c; min-height: 16px; line-height: 1.5; }
+        #sbr-logwin-head {
+            display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+            border-bottom: 1px solid #e6e6e6; flex: 0 0 auto;
+        }
+        #sbr-logwin-head h3 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: .3px; text-transform: uppercase; color: #000; flex: 1; }
+        #sbr-logwin-body { flex: 1; overflow-y: auto; margin: 0; padding: 10px 14px;
+            font-size: 11px; line-height: 1.6; color: #333; white-space: pre-wrap; word-break: break-word;
+            background: #fafafa; }
+        #sbr-logwin-status { flex: 0 0 auto; font-size: 12px; color: #1a3d7c; min-height: 18px; padding: 4px 14px 8px; }
+        #sbr-logwin .sbr-btn { padding: 7px 12px; font-size: 12px; }
+        #sbr-logwin-close { border: none; background: transparent; cursor: pointer; font-size: 17px; line-height: 1; color: #666; padding: 0 2px; }
+        #sbr-logwin-close:hover { color: #000; }
+        .sbr-dark #sbr-logwin { background: #161616; border-color: #3a3a3a; }
+        .sbr-dark #sbr-logwin-head { border-color: #333; }
+        .sbr-dark #sbr-logwin-head h3 { color: #eaeaea; }
+        .sbr-dark #sbr-logwin-body { background: #1e1e1e; color: #b5b5b5; }
+        .sbr-dark #sbr-logwin .sbr-btn { background: #eaeaea; color: #111; border-color: #eaeaea; }
+        .sbr-dark #sbr-logwin .sbr-btn.secondary { background: #161616; color: #eaeaea; border-color: #555; }
+        .sbr-dark #sbr-logwin-close { color: #aaa; }
+        .sbr-dark #sbr-logwin-status { color: #8fb4ff; }
 
         /* Inloggning (Inställningar) */
         #sbr-settings-general { padding: 18px; border-bottom: 1px solid #e6e6e6; }
@@ -651,7 +673,7 @@
                     <button class="sbr-subtab active" data-sub="data">Data</button>
                     <button class="sbr-subtab" data-sub="api">API</button>
                     <button class="sbr-subtab" data-sub="bolag">Bolagsmöte</button>
-                    <button class="sbr-subtab" data-sub="logg">Logg</button>
+                    <button class="sbr-subtab" id="sbr-logg-open">Logg</button>
                 </div>
                 <button id="sbr-settings-lock" title="Lås inställningarna">🔒 Lås</button>
             </div>
@@ -748,18 +770,6 @@
                         <label class="sbr-key-show"><input type="checkbox" id="sbr-key-reveal"> Visa</label>
                     </div>
                     <div id="sbr-key-status"></div>
-                </div>
-            <div id="sbr-sub-logg" class="sbr-subview">
-                <div class="sbr-settings-section">
-                    <h3>Fellogg</h3>
-                    <p>Här samlas fel fr\u00e5n chatten, nyckelhämtningen och publiceringen. Kopiera loggen och klistra in den om n\u00e5got inte fungerar.</p>
-                    <div class="sbr-key-row">
-                        <button class="sbr-btn" id="sbr-log-copy">Kopiera text</button>
-                        <button class="sbr-btn" id="sbr-log-copy-json">Kopiera JSON</button>
-                        <button class="sbr-btn secondary" id="sbr-log-clear">Rensa</button>
-                    </div>
-                    <div id="sbr-log-status"></div>
-                    <pre id="sbr-log-view"></pre>
                 </div>
             </div>
             </div>
@@ -1138,24 +1148,24 @@
     const subviews = {
         data: panel.querySelector('#sbr-sub-data'),
         api:  panel.querySelector('#sbr-sub-api'),
-        bolag: panel.querySelector('#sbr-sub-bolag'),
-        logg: panel.querySelector('#sbr-sub-logg')
+        bolag: panel.querySelector('#sbr-sub-bolag')
     };
     subtabs.forEach(function (st) {
         st.addEventListener('click', function () {
+            if (!st.dataset.sub) return;   // Logg-knappen öppnar ett eget fönster
             subtabs.forEach(s => s.classList.remove('active'));
             st.classList.add('active');
             Object.keys(subviews).forEach(function (k) {
                 subviews[k].classList.toggle('active', k === st.dataset.sub);
             });
-            if (st.dataset.sub === 'logg') renderLogView();
         });
     });
     // =========================================================================
-    // FELLOGG (Inställningar \u2192 Logg)
+    // FELLOGG (Inställningar → Logg) – eget flytande fönster
     // =========================================================================
-    const logView   = panel.querySelector('#sbr-log-view');
-    const logStatus = panel.querySelector('#sbr-log-status');
+    // Fönstret är fristående från panelen så att loggen kan vara öppen medan
+    // man testar chatten, konverteringen eller publiceringen. Innehållet
+    // uppdateras live (1 gång/sekund) medan fönstret är öppet.
     function logAsText(entries) {
         return entries.map(e =>
             e.at + '  [' + e.where + ']\n' + e.message +
@@ -1163,10 +1173,19 @@
             (e.stack ? '\n  stack: ' + e.stack : '')
         ).join('\n\n');
     }
-    function renderLogView() {
-        logView.textContent = logEntries.length
-            ? logAsText(logEntries)
-            : 'Inga fel loggade.';
+    let logWin = null, logWinTimer = null;
+    function renderLogWin() {
+        if (!logWin) return;
+        const body = logWin.querySelector('#sbr-logwin-body');
+        const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+        body.textContent = logEntries.length ? logAsText(logEntries) : 'Inga fel loggade.';
+        if (nearBottom) body.scrollTop = body.scrollHeight;
+    }
+    function logWinStatus(text) {
+        if (!logWin) return;
+        const st = logWin.querySelector('#sbr-logwin-status');
+        st.textContent = text;
+        setTimeout(() => { if (logWin) st.textContent = ''; }, 3000);
     }
     async function copyLogText(kind) {
         const text = kind === 'json'
@@ -1174,23 +1193,51 @@
             : logAsText(logEntries);
         try {
             await navigator.clipboard.writeText(text);
-            logStatus.textContent = 'Kopierat!';
+            logWinStatus('Kopierat!');
         } catch (e) {
-            logView.textContent = text;
-            logView.focus();
-            getSelection().selectAllChildren(logView);
-            try { await document.execCommand('copy'); logStatus.textContent = 'Kopierat!'; }
-            catch (e2) { logStatus.textContent = 'Kunde inte kopiera – markera och kopiera manuellt nedan.'; }
+            const body = logWin.querySelector('#sbr-logwin-body');
+            body.textContent = text;
+            const r = document.createRange(); r.selectNodeContents(body);
+            const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+            try { await document.execCommand('copy'); logWinStatus('Kopierat!'); }
+            catch (e2) { logWinStatus('Kunde inte kopiera automatiskt – markera texten och kopiera manuellt.'); }
         }
-        setTimeout(() => { logStatus.textContent = ''; }, 3000);
     }
-    panel.querySelector('#sbr-log-copy').addEventListener('click', () => copyLogText('text'));
-    panel.querySelector('#sbr-log-copy-json').addEventListener('click', () => copyLogText('json'));
-    panel.querySelector('#sbr-log-clear').addEventListener('click', function () {
-        clearLog();
-        renderLogView();
-        logStatus.textContent = 'Loggen rensad.';
-        setTimeout(() => { logStatus.textContent = ''; }, 3000);
+    function toggleLogWin() {
+        if (logWin) { closeLogWin(); return; }
+        logWin = document.createElement('div');
+        logWin.id = 'sbr-logwin';
+        if (panel.classList.contains('sbr-dark')) logWin.classList.add('sbr-dark');
+        logWin.innerHTML = `
+            <div id="sbr-logwin-head">
+                <h3>Fellogg</h3>
+                <button class="sbr-btn" id="sbr-logwin-copy">Kopiera text</button>
+                <button class="sbr-btn" id="sbr-logwin-copy-json">Kopiera JSON</button>
+                <button class="sbr-btn secondary" id="sbr-logwin-clear">Rensa</button>
+                <button id="sbr-logwin-close" title="Stäng">✕</button>
+            </div>
+            <pre id="sbr-logwin-body"></pre>
+            <div id="sbr-logwin-status"></div>`;
+        document.body.appendChild(logWin);
+        renderLogWin();
+        logWin.querySelector('#sbr-logwin-body').scrollTop = 1e9;
+        logWin.querySelector('#sbr-logwin-close').addEventListener('click', closeLogWin);
+        logWin.querySelector('#sbr-logwin-copy').addEventListener('click', () => copyLogText('text'));
+        logWin.querySelector('#sbr-logwin-copy-json').addEventListener('click', () => copyLogText('json'));
+        logWin.querySelector('#sbr-logwin-clear').addEventListener('click', function () {
+            clearLog();
+            renderLogWin();
+            logWinStatus('Loggen rensad.');
+        });
+        logWinTimer = setInterval(renderLogWin, 1000);
+    }
+    function closeLogWin() {
+        if (logWinTimer) { clearInterval(logWinTimer); logWinTimer = null; }
+        if (logWin) { logWin.remove(); logWin = null; }
+    }
+    panel.querySelector('#sbr-logg-open').addEventListener('click', function () {
+        subtabs.forEach(s => s.classList.remove('active'));
+        toggleLogWin();
     });
 
     // =========================================================================
