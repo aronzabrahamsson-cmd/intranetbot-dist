@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.20.1
+// @version      1.20.2
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -1203,6 +1203,33 @@
             catch (e2) { logWinStatus('Kunde inte kopiera automatiskt – markera texten och kopiera manuellt.'); }
         }
     }
+    // Diagnostik: rullar nätverksvägen steg för steg och skriver resultatet
+    // i loggen. GM_xmlhttpRequest går via skripthanterarens bakgrundssida,
+    // fetch går direkt från sidan – olika fel pekar på olika orsaker.
+    async function runConnectionTest() {
+        logWinStatus('Testar anslutningen…');
+        const key = getActiveKey();
+        if (!key) logError('anslutningstest', new Error('Ingen API-nyckel aktiv – lägg in nyckel under API-fliken.'));
+        // Steg 1: GM_xmlhttpRequest (samma väg som publiceringen använder)
+        try {
+            const r = await mistralRequest('GET', LIBRARY_API_URL + '/documents?page_size=1&page=0');
+            logError('anslutningstest GM OK', new Error('GM_xmlhttpRequest nådde Mistral (' + (r && r.data ? r.data.length : '?') + ' filer synliga).'));
+        } catch (e) {
+            logError('anslutningstest GM FEL', e, { vag: 'GM_xmlhttpRequest (skripthanterarens bakgrundssida)' });
+        }
+        // Steg 2: vanlig fetch från sidan (CORS tillåts av Mistral med nyckel)
+        try {
+            const resp = await fetch('https://api.mistral.ai/v1/libraries/' + LIBRARY_ID + '/documents?page_size=1', {
+                headers: { 'Authorization': 'Bearer ' + key }
+            });
+            if (resp.ok) logError('anslutningstest fetch OK', new Error('fetch nådde Mistral direkt (HTTP ' + resp.status + ').'));
+            else logError('anslutningstest fetch HTTP-fel', new Error('HTTP ' + resp.status + ': ' + (await resp.text()).slice(0, 300)));
+        } catch (e) {
+            logError('anslutningstest fetch FEL', e, { vag: 'fetch direkt från sidan (kan blockeras av CORS/nätverk)' });
+        }
+        renderLogWin();
+        logWinStatus('Testet är klart – se loggen.');
+    }
     function toggleLogWin() {
         if (logWin) { closeLogWin(); return; }
         logWin = document.createElement('div');
@@ -1213,6 +1240,7 @@
                 <h3>Fellogg</h3>
                 <button class="sbr-btn" id="sbr-logwin-copy">Kopiera text</button>
                 <button class="sbr-btn" id="sbr-logwin-copy-json">Kopiera JSON</button>
+                <button class="sbr-btn secondary" id="sbr-logwin-test">Testa anslutning</button>
                 <button class="sbr-btn secondary" id="sbr-logwin-clear">Rensa</button>
                 <button id="sbr-logwin-close" title="Stäng">✕</button>
             </div>
@@ -1229,6 +1257,7 @@
             renderLogWin();
             logWinStatus('Loggen rensad.');
         });
+        logWin.querySelector('#sbr-logwin-test').addEventListener('click', runConnectionTest);
         logWinTimer = setInterval(renderLogWin, 1000);
     }
     function closeLogWin() {
@@ -1603,8 +1632,16 @@
                     try { resolve(JSON.parse(resp.responseText)); }
                     catch (e) { resolve(null); }
                 },
-                onerror:   function () { logError('mistralRequest ' + method, new Error('Nätverksfel mot Mistral.')); reject(new Error('Nätverksfel mot Mistral.')); },
-                ontimeout: function () { logError('mistralRequest ' + method, new Error('Mistral svarade inte i tid.')); reject(new Error('Mistral svarade inte i tid.')); }
+                onerror:   function (resp) {
+                    const err = new Error('Nätverksfel mot Mistral (GM_xmlhttpRequest onerror).');
+                    logError('mistralRequest ' + method, err, { url: url, error: resp && resp.error ? String(resp.error) : undefined, status: resp && resp.status });
+                    reject(err);
+                },
+                ontimeout: function () {
+                    const err = new Error('Mistral svarade inte i tid (timeout efter 120 s).');
+                    logError('mistralRequest ' + method, err, { url: url });
+                    reject(err);
+                }
             });
         });
     }
