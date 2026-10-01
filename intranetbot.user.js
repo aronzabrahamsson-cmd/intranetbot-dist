@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.23.0
+// @version      1.24.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -1940,21 +1940,48 @@
 
     // --- pdf.js (laddas via @require; workern skapas från @resource som blob) ---
     let pdfjsReady = null;
+    const PDFJS_VERSION  = '3.11.174';
+    const PDFJS_CDN      = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@' + PDFJS_VERSION + '/build/';
+    // Laddar pdf.js. @require/@resource finns bara i riktiga skripthanterare;
+    // i alla andra fall (t.ex. en egen lokal hanterare) laddas biblioteket
+    // och workern direkt från CDN vid behov.
+    // Laddar en JS-fil. En <script>-tagg kan stoppas av sidans CSP
+    // (script-src), därför provas först fetch + eval – det körs i
+    // skriptvärlden, som skripthanteraren gör undantagen från CSP för.
+    async function loadScript(src) {
+        try {
+            const resp = await fetch(src);
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            (0, eval)(await resp.text());
+            return;
+        } catch (e) { /* prova <script>-taggen som backup */ }
+        await new Promise(function (resolve, reject) {
+            const el = document.createElement('script');
+            el.src = src;
+            el.onload = resolve;
+            el.onerror = () => reject(new Error('Kunde inte ladda ' + src));
+            (document.head || document.documentElement).appendChild(el);
+        });
+    }
     function getPdfjs() {
         if (!pdfjsReady) {
-            pdfjsReady = Promise.resolve().then(function () {
-                const lib = (typeof pdfjsLib !== 'undefined' && pdfjsLib) || window.pdfjsLib || (typeof unsafeWindow !== 'undefined' && unsafeWindow.pdfjsLib);
-                if (!lib) throw new Error('PDF-läsaren kunde inte laddas. Uppdatera skriptet i Tampermonkey.');
-                // @resource saknas i vissa lokala skripthanterare: ladda
-                // workern direkt från CDN i stället (pdf.js kräver en worker).
-                if (typeof GM_getResourceText === 'function') {
-                    lib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([GM_getResourceText('pdfworker')], { type: 'text/javascript' }));
-                } else {
-                    lib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+            pdfjsReady = (async () => {
+                let lib = (typeof pdfjsLib !== 'undefined' && pdfjsLib) || window.pdfjsLib ||
+                          (typeof unsafeWindow !== 'undefined' && unsafeWindow.pdfjsLib);
+                if (!lib) {
+                    await loadScript(PDFJS_CDN + 'pdf.min.js');
+                    lib = window.pdfjsLib;
                 }
-                lib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([workerCode], { type: 'text/javascript' }));
+                if (!lib) throw new Error('PDF-läsaren kunde inte laddas (varken @require eller CDN).');
+                if (typeof GM_getResourceText === 'function') {
+                    try {
+                        lib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([GM_getResourceText('pdfworker')], { type: 'text/javascript' }));
+                        return lib;
+                    } catch (e) { /* fall ned till CDN */ }
+                }
+                lib.GlobalWorkerOptions.workerSrc = PDFJS_CDN + 'pdf.worker.min.js';
                 return lib;
-            });
+            })();
         }
         return pdfjsReady;
     }
