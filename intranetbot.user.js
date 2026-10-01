@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.22.0
+// @version      1.23.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -173,13 +173,13 @@
     }
     let busy = false;
 
-    // Medarbetarregister för exakt, lokalt personuppslag (Väg 2). Fylls vid
-    // konvertering och sparas i GM-lagring, så personfrågor kan besvaras direkt
-    // i webbläsaren utan att förlita sig på RAG-sökningen.
+    // Medarbetarregister för exakt, lokalt personuppslag (Väg 2). Sparas ALDRIG
+    // – listan läses live från intranätets sida "Mina kollegor" vid behov.
+    // (Gamla värden från tidigare versioner rensas bort här.)
     let peopleRecords = [];
     try {
         const stored = shimGet('sbr_people', '');
-        if (stored) peopleRecords = JSON.parse(stored);
+        if (stored) shimSet('sbr_people', '');
     } catch (e) { peopleRecords = []; }
 
     // Alla (inte bara administratören) får exakta personsvar direkt: listan
@@ -1488,10 +1488,8 @@
         }
 
         const sections = [];        // policys, rutiner, nyheter, sidor
-        const peopleSections = [];  // personallistan – egen fil för bättre sökbarhet
-        const peopleRecords  = [];  // strukturerad personaldata för lokalt uppslag
-        const unparsedPeople = [];  // personposter som inte kunde tolkas
-        let kept = 0, skipped = 0, peopleCount = 0;
+        const unparsedPeople = [];  // (ej använt längre – personal tolkas inte)
+        let kept = 0, skipped = 0, peopleCount = 0, skippedPeoplePages = 0;
 
         // Långa sidor (t.ex. personallistan "Mina kollegor") styckas upp så att
         // varje bit får med sidans URL. Då tappar inte enskilda personer sin
@@ -1530,17 +1528,13 @@
             // Nyckelsidan får aldrig hamna i Mistral-biblioteket.
             if (body.indexOf(KEY_MARKER) !== -1 || link.indexOf(KEY_PAGE_SLUG) !== -1) { skipped++; continue; }
 
-            // Är sidan en personallista? Lägg då varje person i den SEPARATA
-            // personalfilen (bättre sökbarhet – listan drunknar inte bland
-            // policytexterna i sökindexet), och spara strukturerad data för
-            // lokalt personuppslag.
-            const people = expandPeople(title, link, body);
-            if (people) {
-                for (const p of people.sections) peopleSections.push(p);
-                for (const r of people.records) peopleRecords.push(r);
-                for (const u of people.unparsed) unparsedPeople.push(title + ': ' + u);
-                peopleCount += people.sections.length;
-                kept++;
+            // Är sidan en personallista?
+            // Personallistan (t.ex. "Mina kollegor") ska inte alls med i
+            // exporten – varken till Mistral eller som lokal kopia. Sidan
+            // hoppas över helt och räknas bara för statusmeddelandet.
+            if (expandPeople(title, link, body)) {
+                skippedPeoplePages++;
+                skipped++;
                 continue;
             }
 
@@ -1570,16 +1564,9 @@
                        'Varje avsnitt har ett publiceringsdatum ("Publicerad:").\n\n';
         const content = { markdown: contentHeader + sections.map(x => x.text).join('\n---\n\n') };
 
-        let people = null;
-        if (peopleSections.length) {
-            const peopleHeader = '# SBR intranät – medarbetare (personalförteckning)\n' +
-                       'Konverterad ' + today + '. ' + peopleCount + ' personer.\n' +
-                       'Varje avsnitt är en medarbetare med titel och kontaktuppgifter.\n\n';
-            people = { markdown: peopleHeader + peopleSections.join('\n---\n\n'), count: peopleCount };
-        }
-
-        return { content: content, people: people, records: peopleRecords,
+        return { content: content, people: null, records: [],
                  kept: kept, skipped: skipped, peopleCount: peopleCount,
+                 skippedPeoplePages: skippedPeoplePages,
                  unparsedPeople: unparsedPeople };
     }
 
@@ -1596,12 +1583,10 @@
                 showConvertStatus('Konverterar…');
                 const result = convertXmlToMarkdown(String(reader.result));
 
-                // Spara medarbetarregistret lokalt för exakt personuppslag
-                // (svarar personfrågor direkt i webbläsaren, utan RAG).
-                if (result.records && result.records.length) {
-                    shimSet('sbr_people', JSON.stringify(result.records));
-                    peopleRecords = result.records;
-                }
+                // Personalinfo ska inte sparas – sidan "Mina kollegor" läses
+                // istället direkt från intranätet vid personfrågor i chatten.
+                try { shimSet('sbr_people', ''); } catch (e) { /* ignorera */ }
+                peopleRecords = [];
 
                 const today = new Date().toISOString().slice(0, 10);
                 // Medarbetarfilen laddas INTE upp till Mistral (dataminimering/
@@ -1613,13 +1598,9 @@
                 converted = { files: files };
 
                 const rows = [{ kind: 'ok', text: result.kept + ' sidor konverterade (' + result.skipped + ' överhoppade)' }];
-                rows.push(result.people
-                    ? { kind: 'ok', text: result.peopleCount + ' medarbetare sparade lokalt (skickas inte till Mistral)' }
-                    : { kind: 'warn', text: 'Ingen personallista hittades' });
-                if (result.unparsedPeople && result.unparsedPeople.length) {
-                    rows.push({ kind: 'warn', text: result.unparsedPeople.length + ' personposter kunde inte tolkas och saknas:' });
-                    for (const u of result.unparsedPeople) rows.push({ kind: 'sub', text: '• ' + u });
-                }
+                rows.push(result.skippedPeoplePages
+                    ? { kind: 'ok', text: 'Personalinfo borttagen ur exporten (' + result.skippedPeoplePages + ' personallistsidor hoppades över)' }
+                    : { kind: 'warn', text: 'Ingen personallista hittades i exporten' });
                 setResult(convertResult, rows);
 
                 setStep(1, 'done');
