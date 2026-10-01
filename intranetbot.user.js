@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.21.0
+// @version      1.22.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -35,12 +35,29 @@
     // Byter du nyckel på sidan hämtar alla automatiskt den nya (inom ett dygn,
     // direkt om den gamla slutar fungera).
     // En nyckel som administratören sparat under Inställningar → API går före.
+    // ---------------------------------------------------------------------------
+    // GM-*-shims: gör skriptet oberoende av skripthanteraren. Om GM-funktionerna
+    // saknas (egen lokal hanterare) eller inte fungerar används localStorage
+    // som lagring och fetch för nätverksanrop. Skriptet startar alltså även
+    // under en minimal hanterare.
+    // ---------------------------------------------------------------------------
+    const HAS_GM     = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+    const HAS_GM_XHR = typeof GM_xmlhttpRequest === 'function';
+    function shimGet(k, d) {
+        if (HAS_GM) { try { return GM_getValue(k, d); } catch (e) { /* fall through */ } }
+        try { const v = localStorage.getItem('sbr_gm_' + k); return v === null ? d : v; } catch (e) { return d; }
+    }
+    function shimSet(k, v) {
+        if (HAS_GM) { try { GM_setValue(k, v); return; } catch (e) { /* fall through */ } }
+        try { localStorage.setItem('sbr_gm_' + k, String(v)); } catch (e) { /* ignorera */ }
+    }
+
     const KEY_PAGE_SLUG   = 'sbr-assistent-konfig';
     const KEY_MARKER      = 'SBR-ASSISTENT-NYCKEL';
     const KEY_REFRESH_MS  = 24 * 60 * 60 * 1000;
 
-    function getManualKey()   { return (GM_getValue('sbr_api_key_primary', '') || '').trim(); }
-    function getIntranetKey() { return (GM_getValue('sbr_api_key_intranet', '') || '').trim(); }
+    function getManualKey()   { return (shimGet('sbr_api_key_primary', '') || '').trim(); }
+    function getIntranetKey() { return (shimGet('sbr_api_key_intranet', '') || '').trim(); }
     function getActiveKey()   { return getManualKey() || getIntranetKey(); }
 
     // Hämtar nyckeln från intranätsidan. Provar både "snygg" permalänk och
@@ -65,13 +82,13 @@
     let keyFetch = null;
     function ensureKey(force) {
         if (getManualKey()) return Promise.resolve(true);
-        const fresh = Date.now() - (GM_getValue('sbr_api_key_intranet_at', 0) || 0) < KEY_REFRESH_MS;
+        const fresh = Date.now() - (shimGet('sbr_api_key_intranet_at', 0) || 0) < KEY_REFRESH_MS;
         if (getIntranetKey() && fresh && !force) return Promise.resolve(true);
         if (!keyFetch) {
             keyFetch = fetchIntranetKey().then(function (key) {
                 if (key) {
-                    GM_setValue('sbr_api_key_intranet', key);
-                    GM_setValue('sbr_api_key_intranet_at', Date.now());
+                    shimSet('sbr_api_key_intranet', key);
+                    shimSet('sbr_api_key_intranet_at', Date.now());
                 }
                 keyFetch = null;
                 return !!getActiveKey();
@@ -102,7 +119,7 @@
     // så de överlever sidomladdningar och kan kopieras som text eller JSON.
     const LOG_MAX = 200;
     let logEntries = [];
-    try { logEntries = JSON.parse(GM_getValue('sbr_error_log', '[]') || '[]'); } catch (e) { logEntries = []; }
+    try { logEntries = JSON.parse(shimGet('sbr_error_log', '[]') || '[]'); } catch (e) { logEntries = []; }
     function logError(where, err, extra) {
         const entry = {
             at: new Date().toISOString(),
@@ -113,12 +130,12 @@
         };
         logEntries.push(entry);
         if (logEntries.length > LOG_MAX) logEntries = logEntries.slice(-LOG_MAX);
-        try { GM_setValue('sbr_error_log', JSON.stringify(logEntries)); } catch (e) { /* ignorera */ }
+        try { shimSet('sbr_error_log', JSON.stringify(logEntries)); } catch (e) { /* ignorera */ }
         console.error('[SBR-assistent]', where, err, extra || '');
     }
     function clearLog() {
         logEntries = [];
-        try { GM_setValue('sbr_error_log', '[]'); } catch (e) { /* ignorera */ }
+        try { shimSet('sbr_error_log', '[]'); } catch (e) { /* ignorera */ }
     }
     // Filer i biblioteket som skriptet äger och ersätter vid publicering:
     // allt som slutar på -innehall.md / -medarbetare.md, även med webbläsarens
@@ -161,7 +178,7 @@
     // i webbläsaren utan att förlita sig på RAG-sökningen.
     let peopleRecords = [];
     try {
-        const stored = GM_getValue('sbr_people', '');
+        const stored = shimGet('sbr_people', '');
         if (stored) peopleRecords = JSON.parse(stored);
     } catch (e) { peopleRecords = []; }
 
@@ -899,34 +916,44 @@
                 body = { agent_id: AGENT_ID, inputs: question };
             }
 
+            const headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Authorization': 'Bearer ' + getActiveKey()
+            };
+            const handleResponse = (status, responseText) => {
+                if (status < 200 || status >= 300) {
+                    throw new Error('HTTP ' + status + ': ' + (responseText || '').slice(0, 300));
+                }
+                let data;
+                try { data = JSON.parse(responseText); }
+                catch (e) { throw new Error('Kunde inte tolka svaret.'); }
+                // Spara/uppdatera konversations-ID för nästa fråga.
+                if (data.conversation_id) { conversationId = data.conversation_id; saveSession(); }
+                // Råsvaret loggas (nivå "debug") för felsökning i webbläsarens konsol.
+                console.debug('[SBR-assistent] råsvar från Mistral:', data);
+                return extractAnswer(data);
+            };
+            const viaFetch = async () => {
+                const resp = await fetch(url, { method: 'POST', headers: headers, body: JSON.stringify(body) });
+                const text = await resp.text();
+                return handleResponse(resp.status, text);
+            };
+            if (!HAS_GM_XHR) { viaFetch().then(resolve, reject); return; }
             GM_xmlhttpRequest({
                 method: 'POST',
                 url: url,
                 timeout: REQUEST_TIMEOUT,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                    'Authorization': 'Bearer ' + getActiveKey()
-                },
+                headers: headers,
                 data: JSON.stringify(body),
                 onload: function (resp) {
-                    if (resp.status < 200 || resp.status >= 300) {
-                        reject(new Error('HTTP ' + resp.status + ': ' + (resp.responseText || '').slice(0, 300)));
-                        return;
-                    }
-                    let data;
-                    try { data = JSON.parse(resp.responseText); }
-                    catch (e) { reject(new Error('Kunde inte tolka svaret.')); return; }
-
-                    // Spara/uppdatera konversations-ID för nästa fråga.
-                    if (data.conversation_id) { conversationId = data.conversation_id; saveSession(); }
-
-                    // Råsvaret loggas (nivå "debug") för felsökning i webbläsarens konsol.
-                    console.debug('[SBR-assistent] råsvar från Mistral:', data);
-                    const answer = extractAnswer(data);
-                    resolve(answer);
+                    try { resolve(handleResponse(resp.status, resp.responseText)); }
+                    catch (e) { reject(e); }
                 },
-                onerror:   function () { reject(new Error('Nätverksfel.')); },
+                onerror:   function () {
+                    // GM-vägen dog – prova fetch innan vi ger upp.
+                    viaFetch().then(resolve, reject);
+                },
                 ontimeout: function () { reject(new Error('Tidsgräns överskreds.')); }
             });
         });
@@ -1285,7 +1312,7 @@
     });
 
     keySaveBtn.addEventListener('click', function () {
-        GM_setValue('sbr_api_key_primary', keyPrimary.value.trim());
+        shimSet('sbr_api_key_primary', keyPrimary.value.trim());
         try { sessionStorage.removeItem(UPDATED_CACHE_KEY); } catch (e) { /* ignorera */ }
         refreshUpdatedTag();
         keyStatus.textContent = getManualKey()
@@ -1572,7 +1599,7 @@
                 // Spara medarbetarregistret lokalt för exakt personuppslag
                 // (svarar personfrågor direkt i webbläsaren, utan RAG).
                 if (result.records && result.records.length) {
-                    GM_setValue('sbr_people', JSON.stringify(result.records));
+                    shimSet('sbr_people', JSON.stringify(result.records));
                     peopleRecords = result.records;
                 }
 
@@ -1632,6 +1659,7 @@
             try { return JSON.parse(text); } catch (e) { return null; }
         };
         try {
+            if (!HAS_GM_XHR) throw { gmDead: true };
             return await new Promise(function (resolve, reject) {
                 GM_xmlhttpRequest({
                     method: method, url: url, headers: headers, data: data, timeout: 120000,
@@ -1936,7 +1964,13 @@
             pdfjsReady = Promise.resolve().then(function () {
                 const lib = (typeof pdfjsLib !== 'undefined' && pdfjsLib) || window.pdfjsLib || (typeof unsafeWindow !== 'undefined' && unsafeWindow.pdfjsLib);
                 if (!lib) throw new Error('PDF-läsaren kunde inte laddas. Uppdatera skriptet i Tampermonkey.');
-                const workerCode = GM_getResourceText('pdfworker');
+                // @resource saknas i vissa lokala skripthanterare: ladda
+                // workern direkt från CDN i stället (pdf.js kräver en worker).
+                if (typeof GM_getResourceText === 'function') {
+                    lib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([GM_getResourceText('pdfworker')], { type: 'text/javascript' }));
+                } else {
+                    lib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+                }
                 lib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([workerCode], { type: 'text/javascript' }));
                 return lib;
             });
@@ -2204,7 +2238,7 @@
     // På Bolagsinfo: infoga en väntande sammanfattning när redigeraren är redo.
     if (isBolagEditPage()) {
         let pending = null;
-        try { pending = JSON.parse(GM_getValue(BOLAG_PENDING, '') || 'null'); } catch (e) { pending = null; }
+        try { pending = JSON.parse(shimGet(BOLAG_PENDING, '') || 'null'); } catch (e) { pending = null; }
         if (pending && Date.now() - pending.at < 30 * 60 * 1000) {
             const started = Date.now();
             (function tryInsert() {
