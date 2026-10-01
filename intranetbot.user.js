@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.19.0
+// @version      1.20.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -55,8 +55,9 @@
                 const text = (await resp.text()).replace(/<[^>]+>/g, ' ');
                 const m = text.match(re);
                 if (m) return m[1];
-            } catch (e) { /* prova nästa adress */ }
+            } catch (e) { logError('nyckelhämtning ' + url, e); }
         }
+        logError('nyckelhämtning', new Error('Ingen nyckel hittades på intranätssidan.'));
         return '';
     }
 
@@ -97,6 +98,28 @@
     // hit direkt via API, och datumtaggen i sidhuvudet läses härifrån.
     const LIBRARY_ID          = '01a047a2-a3ed-768a-930f-615e7aa150d6';
     const LIBRARY_API_URL     = 'https://api.mistral.ai/v1/libraries/' + LIBRARY_ID;
+    // Fellogg (Inställningar → Logg). Sparar de senaste felen i GM-lagring
+    // så de överlever sidomladdningar och kan kopieras som text eller JSON.
+    const LOG_MAX = 200;
+    let logEntries = [];
+    try { logEntries = JSON.parse(GM_getValue('sbr_error_log', '[]') || '[]'); } catch (e) { logEntries = []; }
+    function logError(where, err, extra) {
+        const entry = {
+            at: new Date().toISOString(),
+            where: where,
+            message: err && err.message ? err.message : String(err),
+            stack: err && err.stack ? String(err.stack).slice(0, 1500) : '',
+            detail: extra || null
+        };
+        logEntries.push(entry);
+        if (logEntries.length > LOG_MAX) logEntries = logEntries.slice(-LOG_MAX);
+        try { GM_setValue('sbr_error_log', JSON.stringify(logEntries)); } catch (e) { /* ignorera */ }
+        console.error('[SBR-assistent]', where, err, extra || '');
+    }
+    function clearLog() {
+        logEntries = [];
+        try { GM_setValue('sbr_error_log', '[]'); } catch (e) { /* ignorera */ }
+    }
     // Filer i biblioteket som skriptet äger och ersätter vid publicering:
     // allt som slutar på -innehall.md / -medarbetare.md, även med webbläsarens
     // dubblettsuffix (t.ex. "…-innehall (1).md"). Andra filer lämnas orörda.
@@ -451,6 +474,14 @@
         #sbr-key-status {
             font-size: 12px; color: #1a3d7c; min-height: 16px; line-height: 1.5;
         }
+        #sbr-log-view {
+            margin: 10px 0 0; padding: 10px; border: 1.5px solid #e6e6e6; border-radius: 8px;
+            background: #fafafa; font-family: ${FONT}; font-size: 11px; line-height: 1.5;
+            color: #333; white-space: pre-wrap; word-break: break-word;
+            max-height: 240px; overflow-y: auto;
+        }
+        .sbr-dark #sbr-log-view { background: #242424; border-color: #444; color: #b5b5b5; }
+        #sbr-log-status { font-size: 12px; color: #1a3d7c; min-height: 16px; line-height: 1.5; }
 
         /* Inloggning (Inställningar) */
         #sbr-settings-general { padding: 18px; border-bottom: 1px solid #e6e6e6; }
@@ -620,6 +651,7 @@
                     <button class="sbr-subtab active" data-sub="data">Data</button>
                     <button class="sbr-subtab" data-sub="api">API</button>
                     <button class="sbr-subtab" data-sub="bolag">Bolagsmöte</button>
+                    <button class="sbr-subtab" data-sub="logg">Logg</button>
                 </div>
                 <button id="sbr-settings-lock" title="Lås inställningarna">🔒 Lås</button>
             </div>
@@ -716,6 +748,18 @@
                         <label class="sbr-key-show"><input type="checkbox" id="sbr-key-reveal"> Visa</label>
                     </div>
                     <div id="sbr-key-status"></div>
+                </div>
+            <div id="sbr-sub-logg" class="sbr-subview">
+                <div class="sbr-settings-section">
+                    <h3>Fellogg</h3>
+                    <p>Här samlas fel fr\u00e5n chatten, nyckelhämtningen och publiceringen. Kopiera loggen och klistra in den om n\u00e5got inte fungerar.</p>
+                    <div class="sbr-key-row">
+                        <button class="sbr-btn" id="sbr-log-copy">Kopiera text</button>
+                        <button class="sbr-btn" id="sbr-log-copy-json">Kopiera JSON</button>
+                        <button class="sbr-btn secondary" id="sbr-log-clear">Rensa</button>
+                    </div>
+                    <div id="sbr-log-status"></div>
+                    <pre id="sbr-log-view"></pre>
                 </div>
             </div>
             </div>
@@ -892,6 +936,7 @@
                 lastErr = new Error('Tomt svar.');
             } catch (e) {
                 lastErr = e;
+                logError('chattförsök ' + attempt + '/' + MAX_ATTEMPTS, e);
                 // Ogiltig nyckel: har den bytts på intranätsidan? Hämta om en gång.
                 if (/^HTTP 401/.test(e.message) && !getManualKey() && !keyRefreshed) {
                     keyRefreshed = true;
@@ -979,7 +1024,7 @@
                 'bot'
             );
             setFace('inget', 'Inget svar – försök igen');
-            console.error('[SBR-assistent] Alla försök misslyckades:', result.error);
+            logError('chattfråga', result.error, { question: question.slice(0, 300) });
         }
 
         busy = false;
@@ -1093,7 +1138,8 @@
     const subviews = {
         data: panel.querySelector('#sbr-sub-data'),
         api:  panel.querySelector('#sbr-sub-api'),
-        bolag: panel.querySelector('#sbr-sub-bolag')
+        bolag: panel.querySelector('#sbr-sub-bolag'),
+        logg: panel.querySelector('#sbr-sub-logg')
     };
     subtabs.forEach(function (st) {
         st.addEventListener('click', function () {
@@ -1102,7 +1148,49 @@
             Object.keys(subviews).forEach(function (k) {
                 subviews[k].classList.toggle('active', k === st.dataset.sub);
             });
+            if (st.dataset.sub === 'logg') renderLogView();
         });
+    });
+    // =========================================================================
+    // FELLOGG (Inställningar \u2192 Logg)
+    // =========================================================================
+    const logView   = panel.querySelector('#sbr-log-view');
+    const logStatus = panel.querySelector('#sbr-log-status');
+    function logAsText(entries) {
+        return entries.map(e =>
+            e.at + '  [' + e.where + ']\n' + e.message +
+            (e.detail ? '\n  detalj: ' + (typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail)) : '') +
+            (e.stack ? '\n  stack: ' + e.stack : '')
+        ).join('\n\n');
+    }
+    function renderLogView() {
+        logView.textContent = logEntries.length
+            ? logAsText(logEntries)
+            : 'Inga fel loggade.';
+    }
+    async function copyLogText(kind) {
+        const text = kind === 'json'
+            ? JSON.stringify({ version: (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || 'okänd', page: location.href, entries: logEntries }, null, 2)
+            : logAsText(logEntries);
+        try {
+            await navigator.clipboard.writeText(text);
+            logStatus.textContent = 'Kopierat!';
+        } catch (e) {
+            logView.textContent = text;
+            logView.focus();
+            getSelection().selectAllChildren(logView);
+            try { await document.execCommand('copy'); logStatus.textContent = 'Kopierat!'; }
+            catch (e2) { logStatus.textContent = 'Kunde inte kopiera – markera och kopiera manuellt nedan.'; }
+        }
+        setTimeout(() => { logStatus.textContent = ''; }, 3000);
+    }
+    panel.querySelector('#sbr-log-copy').addEventListener('click', () => copyLogText('text'));
+    panel.querySelector('#sbr-log-copy-json').addEventListener('click', () => copyLogText('json'));
+    panel.querySelector('#sbr-log-clear').addEventListener('click', function () {
+        clearLog();
+        renderLogView();
+        logStatus.textContent = 'Loggen rensad.';
+        setTimeout(() => { logStatus.textContent = ''; }, 3000);
     });
 
     // =========================================================================
@@ -1437,6 +1525,7 @@
                 publishBtn.disabled = false;
                 setResult(publishResult, []);
             } catch (e) {
+                logError('konvertering', e, { fil: file.name });
                 showConvertStatus(e.message, 'err');
             }
         };
@@ -1458,15 +1547,17 @@
                 method: method, url: url, headers: headers, data: data, timeout: 120000,
                 onload: function (resp) {
                     if (resp.status < 200 || resp.status >= 300) {
-                        reject(new Error('HTTP ' + resp.status + ': ' + (resp.responseText || '').slice(0, 200)));
+                        const err = new Error('HTTP ' + resp.status + ': ' + (resp.responseText || '').slice(0, 500));
+                        logError('mistralRequest ' + method + ' ' + url.replace(/https:\/\/api\.mistral\.ai/, ''), err);
+                        reject(err);
                         return;
                     }
                     if (!resp.responseText) { resolve(null); return; }
                     try { resolve(JSON.parse(resp.responseText)); }
                     catch (e) { resolve(null); }
                 },
-                onerror:   function () { reject(new Error('Nätverksfel mot Mistral.')); },
-                ontimeout: function () { reject(new Error('Mistral svarade inte i tid.')); }
+                onerror:   function () { logError('mistralRequest ' + method, new Error('Nätverksfel mot Mistral.')); reject(new Error('Nätverksfel mot Mistral.')); },
+                ontimeout: function () { logError('mistralRequest ' + method, new Error('Mistral svarade inte i tid.')); reject(new Error('Mistral svarade inte i tid.')); }
             });
         });
     }
@@ -1558,6 +1649,7 @@
             try { sessionStorage.removeItem(UPDATED_CACHE_KEY); } catch (e) { /* ignorera */ }
             refreshUpdatedTag();
         } catch (e) {
+            logError('publicering', e, { uppladdade: uploaded.length });
             const last = rows[rows.length - 1];
             if (last && last.kind === 'wait') last.kind = 'err';
             rows.push({ kind: 'err', text: e.message });
@@ -1948,6 +2040,7 @@
             show();
             setBStep(1, 'done'); setBStep(2, 'active'); setBStep(3, 'active'); bolagInsert.disabled = false;
         } catch (e) {
+            logError('bolagsmöte', e, { fil: fileName });
             const last = rows[rows.length - 1]; if (last && last.kind === 'wait') last.kind = 'err';
             rows.push({ kind: 'err', text: e.message }); show();
         }
