@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.18.0
+// @version      1.19.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
+// @match        chrome://newtab/
 // @exclude      https://sbr.wiki/wp/wp-admin/*
 // @exclude      https://sbr.wiki/wp/wp-login.php*
 // @updateURL    https://raw.githubusercontent.com/aronzabrahamsson-cmd/intranetbot-dist/main/intranetbot.user.js
@@ -228,6 +229,19 @@
         // \b fungerar bara för a–z i JS, därför egna ordgränser med \p{L}.
         return /(?<![\p{L}\p{M}])(vem|vilka|kontakt|mejl|mejla|maila|mail|telefon|ringa|nå|når)(?![\p{L}\p{M}])/iu.test(question)
             || /^\s*[\p{L}\p{M}'’.\-]+\s*$/u.test(question); // enbart ett ord/namn
+    }
+    // Avgör om frågan gäller personal, avdelningar eller roller (inte enskilda
+    // namn). Sådana frågor ska aldrig gå vidare till Mistral – där finns inga
+    // medarbetaruppgifter längre – utan besvaras med en vänlig hänvisning.
+    function looksLikeStaffTopicQuery(question) {
+        return /(?<![\p{L}\p{M}])(personal|medarbetare|medarbetar\w*|anställd\w*|kolleg\w*|avdelning\w*|avdelningar|arbetsområde\w*|arbetsuppgift\w*|ansvarar|ansvarig\w*|chef\w*|roller?|rollerna|titel\w*)(?![\p{L}\p{M}])/iu.test(question)
+            || /vem\b.*\b(arbetar|jobbar|ansvarar)/iu.test(question)
+            || /vilka\b.*\b(personer|medarbetare|avdelningar|kolleger)/iu.test(question);
+    }
+    // Vänlig hänvisning till Mina kollegor i stället för ett gissat svar.
+    function formatStaffReferral() {
+        return 'Tyvärr kan jag inte svara på frågor om enskilda personer, men du hittar alla avdelningar och all personal här: ' +
+               '[Mina kollegor](https://sbr.wiki' + STAFF_PAGE_URL + ')';
     }
 
     // =========================================================================
@@ -917,6 +931,17 @@
                 return;
             }
         }
+        // Personal-/avdelningsfrågor ska aldrig gå till Mistral (där finns inga
+        // medarbetaruppgifter) – hänvisa vänligt till Mina kollegor i stället.
+        if (looksLikeStaffTopicQuery(question)) {
+            addMessage(question, 'user');
+            addMessage(renderMarkdown(formatStaffReferral()), 'bot', { html: true });
+            setFace('standard', 'Redo att hjälpa till');
+            input.value = '';
+            input.style.height = 'auto';
+            input.focus();
+            return;
+        }
 
         // Ingen nyckel ännu? Försök hämta den från intranätet först.
         if (!getActiveKey()) await ensureKey(true);
@@ -1388,13 +1413,17 @@
                 }
 
                 const today = new Date().toISOString().slice(0, 10);
+                // Medarbetarfilen laddas INTE upp till Mistral (dataminimering/
+                // GDPR). Personaluppgifterna sparas bara lokalt och används
+                // för exakt personuppslag i webbläsaren. En eventuell gammal
+                // medarbetarfil i biblioteket raderas automatiskt vid
+                // publicering (den matchar OWN_DOC_RE men ersätts inte).
                 const files = [{ name: 'sbr-' + today + '-innehall.md', markdown: result.content.markdown }];
-                if (result.people) files.push({ name: 'sbr-' + today + '-medarbetare.md', markdown: result.people.markdown });
                 converted = { files: files };
 
                 const rows = [{ kind: 'ok', text: result.kept + ' sidor konverterade (' + result.skipped + ' överhoppade)' }];
                 rows.push(result.people
-                    ? { kind: 'ok', text: result.peopleCount + ' medarbetare' }
+                    ? { kind: 'ok', text: result.peopleCount + ' medarbetare sparade lokalt (skickas inte till Mistral)' }
                     : { kind: 'warn', text: 'Ingen personallista hittades' });
                 if (result.unparsedPeople && result.unparsedPeople.length) {
                     rows.push({ kind: 'warn', text: result.unparsedPeople.length + ' personposter kunde inte tolkas och saknas:' });
