@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.20.2
+// @version      1.21.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -1613,37 +1613,41 @@
     // PUBLICERA TILL MISTRAL (Libraries API)
     // =========================================================================
     // Anropar Mistral med den sparade nyckeln. body: FormData eller objekt (JSON).
-    function mistralRequest(method, url, body) {
-        return new Promise(function (resolve, reject) {
-            const headers = { 'Accept': 'application/json', 'Authorization': 'Bearer ' + getActiveKey() };
-            let data;
-            if (body instanceof FormData) data = body;
-            else if (body !== undefined) { data = JSON.stringify(body); headers['Content-Type'] = 'application/json'; }
-            GM_xmlhttpRequest({
-                method: method, url: url, headers: headers, data: data, timeout: 120000,
-                onload: function (resp) {
-                    if (resp.status < 200 || resp.status >= 300) {
-                        const err = new Error('HTTP ' + resp.status + ': ' + (resp.responseText || '').slice(0, 500));
-                        logError('mistralRequest ' + method + ' ' + url.replace(/https:\/\/api\.mistral\.ai/, ''), err);
-                        reject(err);
-                        return;
-                    }
-                    if (!resp.responseText) { resolve(null); return; }
-                    try { resolve(JSON.parse(resp.responseText)); }
-                    catch (e) { resolve(null); }
-                },
-                onerror:   function (resp) {
-                    const err = new Error('Nätverksfel mot Mistral (GM_xmlhttpRequest onerror).');
-                    logError('mistralRequest ' + method, err, { url: url, error: resp && resp.error ? String(resp.error) : undefined, status: resp && resp.status });
-                    reject(err);
-                },
-                ontimeout: function () {
-                    const err = new Error('Mistral svarade inte i tid (timeout efter 120 s).');
-                    logError('mistralRequest ' + method, err, { url: url });
-                    reject(err);
-                }
+    // Mistral-API:t tillåter CORS-anrop med Authorization, så en vanlig fetch
+    // fungerar direkt från sidan. GM_xmlhttpRequest provas först, men om
+    // skripthanterarens bakgrundssida inte svarar (t.ex. "Receiving end does
+    // not exist") faller vi tillbaka på fetch i stället för att misslyckas.
+    async function mistralRequest(method, url, body) {
+        const headers = { 'Accept': 'application/json', 'Authorization': 'Bearer ' + getActiveKey() };
+        let data;
+        if (body instanceof FormData) data = body;
+        else if (body !== undefined) { data = JSON.stringify(body); headers['Content-Type'] = 'application/json'; }
+        const handle = (ok, status, text) => {
+            if (!ok) {
+                const err = new Error('HTTP ' + status + ': ' + (text || '').slice(0, 500));
+                logError('mistralRequest ' + method + ' ' + url.replace(/https:\/\/api\.mistral\.ai/, ''), err);
+                throw err;
+            }
+            if (!text) return null;
+            try { return JSON.parse(text); } catch (e) { return null; }
+        };
+        try {
+            return await new Promise(function (resolve, reject) {
+                GM_xmlhttpRequest({
+                    method: method, url: url, headers: headers, data: data, timeout: 120000,
+                    onload: resp => { try { resolve(handle(resp.status >= 200 && resp.status < 300, resp.status, resp.responseText)); } catch (e) { reject(e); } },
+                    onerror: resp => reject({ gmDead: true, resp: resp }),
+                    ontimeout: () => reject(new Error('Mistral svarade inte i tid (timeout efter 120 s).'))
+                });
             });
-        });
+        } catch (e) {
+            if (!e || !e.gmDead) throw e;
+            // GM-vägen dog (bakgrundssidan svarar inte) – försök med fetch.
+            logError('mistralRequest ' + method, new Error('GM_xmlhttpRequest svarar inte – byter till fetch.'), { url: url });
+            const resp = await fetch(url, { method: method, headers: headers, body: data });
+            const text = await resp.text();
+            return handle(resp.ok, resp.status, text);
+        }
     }
 
     async function listLibraryDocs(maxPages) {
