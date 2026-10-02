@@ -1653,9 +1653,14 @@
             if (!e || !e.gmDead) throw e;
             // GM-vägen dog (bakgrundssidan svarar inte) – försök med fetch.
             logError('mistralRequest ' + method, new Error('GM_xmlhttpRequest svarar inte – byter till fetch.'), { url: url });
-            const resp = await fetch(url, { method: method, headers: headers, body: data });
-            const text = await resp.text();
-            return handle(resp.ok, resp.status, text);
+            try {
+                const resp = await fetch(url, { method: method, headers: headers, body: data });
+                const text = await resp.text();
+                return handle(resp.ok, resp.status, text);
+            } catch (e2) {
+                logError('mistralRequest ' + method + ' (fetch)', e2, { url: url });
+                throw e2;
+            }
         }
     }
 
@@ -1798,7 +1803,10 @@
             const at = own ? own.created_at : null;
             try { sessionStorage.setItem(UPDATED_CACHE_KEY, JSON.stringify({ at: at, fetched: Date.now() })); } catch (e) { /* ignorera */ }
             renderUpdatedTag(at);
-        } catch (e) { /* utan åtkomst till biblioteket visas ingen tagg */ }
+        } catch (e) {
+            // Utan åtkomst till biblioteket visas ingen tagg, men felet loggas för felsökning.
+            logError('refreshUpdatedTag', e);
+        }
     }
 
     // Klick på dropzonen öppnar filväljaren.
