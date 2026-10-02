@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.24.0
+// @version      1.24.2
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -331,6 +331,10 @@
             font-weight: 700; font-size: 15px; color: #fff;
             letter-spacing: .3px; text-transform: uppercase;
         }
+        #sbr-assistant-header .sbr-version {
+            font-size: 11px; font-weight: 400; color: #000;
+            text-transform: none; letter-spacing: 0; margin-left: 6px;
+        }
         #sbr-assistant-header .sbr-status-row { display: flex; align-items: baseline; gap: 6px; margin-top: 3px; flex-wrap: wrap; }
         #sbr-assistant-header .sbr-status { font-size: 12px; color: #bdbdbd; min-height: 15px; font-weight: 400; }
         /* Datumtagg: syns bättre ju äldre biblioteket är (se renderUpdatedTag). */
@@ -643,7 +647,7 @@
         <div id="sbr-assistant-header">
             <img id="sbr-assistant-face" src="${IMG.standard}" alt="">
             <div class="sbr-titles">
-                <div class="sbr-title">Intranät-assistent</div>
+                <div class="sbr-title">Intranät-assistent<span class="sbr-version">${(typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '1.24.2'}</span></div>
                 <div class="sbr-status-row">
                     <div class="sbr-status" id="sbr-assistant-status">Redo att hjälpa till</div>
                     <span id="sbr-updated"></span>
