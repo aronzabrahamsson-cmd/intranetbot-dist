@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.24.2
+// @version      1.25.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -855,6 +855,72 @@
         return s;
     }
 
+    // Kända felaktiga sökvägar som modellen ibland hittar p\u00e5: r\u00e4ttas automatiskt
+    // till verkliga intran\u00e4tssidor. Nyckeln \u00e4r s\u00f6kv\u00e4gen precis efter dom\u00e4nen,
+    // oavsett exakt stavning/trailing slash.
+    const LINK_FIXES = [
+        { re: /^\/medarbetare(\/|$)/i,  to: '/mina-kollegor/' }
+    ];
+
+    // R\u00e4ttar k\u00e4nda felaktiga sbr.wiki-s\u00f6kv\u00e4gar i en URL.
+    function fixKnownLink(href) {
+        if (!href) return href;
+        let m;
+        try { m = new URL(href, location.origin); } catch (e) { return href; }
+        if (!/(^|\.)sbr\.wiki$/i.test(m.hostname)) return href;
+        for (const f of LINK_FIXES) {
+            if (f.re.test(m.pathname)) {
+                m.pathname = f.to;
+                return m.href;
+            }
+        }
+        return href;
+    }
+
+    // Sanerar l\u00e4nkar i agentens svar: r\u00e4ttar k\u00e4nda fel och verifierar sedan varje
+    // sbr.wiki-l\u00e4nk mot intran\u00e4tet (HEAD-cachat i sessionen). En l\u00e4nk som inte finns
+    // visas som vanlig text ist\u00e4llet \u2013 anv\u00e4ndaren f\u00e5r aldrig en d\u00f6d l\u00e4nk.
+    const linkCheckCache = {};
+    function checkLinkExists(url) {
+        if (Object.prototype.hasOwnProperty.call(linkCheckCache, url)) {
+            return linkCheckCache[url];
+        }
+        const p = fetch(url, { method: 'HEAD', credentials: 'same-origin', cache: 'no-store' })
+            .then(r => r.ok)
+            .catch(() => false)
+            .then(ok => { linkCheckCache[url] = ok; return ok; });
+        linkCheckCache[url] = p;
+        return p;
+    }
+
+    async function sanitizeAnswerLinks(text) {
+        if (!text) return text;
+        let s = text;
+        // R\u00e4tta k\u00e4nda felaktiga s\u00f6kv\u00e4gar \u00f6verallt i svaret.
+        s = s.replace(/\]\((https?:\/\/[^\s)]+)\)/g, function (all, href) {
+            return '](' + fixKnownLink(href) + ')';
+        });
+        // Verifiera sbr.wiki-l\u00e4nkar: finns sidan inte, beh\u00e5ll bara l\u00e4nktexten.
+        const linkRe = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+        const matches = [];
+        let mm;
+        while ((mm = linkRe.exec(s)) !== null) matches.push(mm);
+        const oks = await Promise.all(matches.map(function (m2) {
+            try {
+                const u = new URL(m2[2], location.origin);
+                if (!/(^|\.)sbr\.wiki$/i.test(u.hostname)) return true;
+            } catch (e) { return true; }
+            return checkLinkExists(m2[2]);
+        }));
+        // Bygg om str\u00e4ngen bakl\u00e4nges s\u00e5 index f\u00f6rblir giltiga.
+        for (let i = matches.length - 1; i >= 0; i--) {
+            if (oks[i]) continue;
+            const m2 = matches[i];
+            s = s.slice(0, m2.index) + m2[1] + s.slice(m2.index + m2[0].length);
+        }
+        return s;
+    }
+
     // Plocka ut assistentens svarstext ur Mistrals conversation-svar.
     function extractAnswer(data) {
         if (!data || !Array.isArray(data.outputs)) return '';
@@ -1057,7 +1123,8 @@
         thinkingEl.remove();
 
         if (result.ok) {
-            addMessage(renderMarkdown(result.answer), 'bot', { html: true });
+            const safeAnswer = await sanitizeAnswerLinks(cleanupAnswer(result.answer));
+            addMessage(renderMarkdown(safeAnswer), 'bot', { html: true });
             setFace('standard', 'Redo att hjälpa till');
         } else {
             addMessage(
