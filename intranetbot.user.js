@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.25.0
+// @version      1.26.0
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
@@ -141,6 +141,7 @@
     // allt som slutar på -innehall.md / -medarbetare.md, även med webbläsarens
     // dubblettsuffix (t.ex. "…-innehall (1).md"). Andra filer lämnas orörda.
     const OWN_DOC_RE          = /-(innehall|medarbetare)(\s*\(\d+\))?\.md$/i;
+    const BOLAG_DOC_RE         = /-bolagsmote(\s*\(\d+\))?\.md$/i;
 
     // Bilder (base64) -> standard / arbetar / inget resultat
     const IMG = {
@@ -274,9 +275,17 @@
     // namn). Sådana frågor ska aldrig gå vidare till Mistral – där finns inga
     // medarbetaruppgifter längre – utan besvaras med en vänlig hänvisning.
     function looksLikeStaffTopicQuery(question) {
-        return /(?<![\p{L}\p{M}])(personal|medarbetare|medarbetar\w*|anställd\w*|kolleg\w*|avdelning\w*|avdelningar|arbetsområde\w*|arbetsuppgift\w*|ansvarar|ansvarig\w*|chef\w*|roller?|rollerna|titel\w*)(?![\p{L}\p{M}])/iu.test(question)
-            || /vem\b.*\b(arbetar|jobbar|ansvarar)/iu.test(question)
-            || /vilka\b.*\b(personer|medarbetare|avdelningar|kolleger)/iu.test(question);
+        // Frågor som i grunden handlar om något annat (t.ex. lösenord, IT,
+        // policy, säkerhet) men råkar nämna kollegor ska INTE hänvisas vidare.
+        const OTHER_TOPIC_RE = /(?<![\p{L}\p{M}])(lösenord|inloggning|inloggningsuppgifter|vpn|dator|it-support|itärenden|licens\w*|verktyg|mötesrum|boka|bokning|semester|förmån\w*|policys|policy\w*|regel\w*|rutin\w*|instruktion\w*|guide|manual|system\w*)(?![\p{L}\p{M}])/iu;
+        // Äkta personalfrågor: frågande uttryck som pekar mot personal,
+        // avdelningar, roller eller kontaktuppgifter.
+        const STAFF_QUESTION_RE = /(?<![\p{L}\p{M}])(vem är|vem har|vem ska|vem kan|vem ansvarar|vem jobbar|vem arbetar|vilka (personer|medarbetare|kollegor|avdelningar|roller)|kontakta|slå upp|hänger |finns det någon |telefonnummer till|e-?post till|mobilnummer till)(?![\p{L}\p{M}])/iu;
+        // Personalord + frågeverb i samma fråga – och inget ämne som äger frågan.
+        const STAFF_WORD_RE = /(?<![\p{L}\p{M}])(personal|medarbetare|medarbetar\w*|anställd\w*|kolleg\w*|avdelning\w*|avdelningar|arbetsområde\w*|arbetsuppgift\w*|ansvarig\w*|chef\w*|rollerna|titeln|titel\w*)(?![\p{L}\p{M}])/iu;
+        const QUESTION_RE = /(?<![\p{L}\p{M}])(vem|vilka|vilken|kontakt|mejl|mejla|maila|mail|e-?post|telefon|mobil|ringa|nå|jobbar|arbetar|ansvarar|hänger|finns)(?![\p{L}\p{M}])/iu;
+        if (STAFF_QUESTION_RE.test(question)) return true;
+        return STAFF_WORD_RE.test(question) && QUESTION_RE.test(question) && !OTHER_TOPIC_RE.test(question);
     }
     // Vänlig hänvisning till Mina kollegor i stället för ett gissat svar.
     function formatStaffReferral() {
@@ -726,11 +735,11 @@
                 <div class="sbr-step locked" id="sbr-step-3">
                     <div class="sbr-step-head"><span class="sbr-step-num">3</span><h3>Publicera till Mistral</h3></div>
                     <ul class="sbr-step-list">
-                        <li>Laddar upp de nya filerna</li>
+                        <li>Sker automatiskt direkt efter konverteringen</li>
                         <li>Tar bort de gamla när de nya är klara</li>
                         <li>Tar oftast 1–3 minuter</li>
                     </ul>
-                    <button class="sbr-btn" id="sbr-publish-btn" disabled>Publicera till Mistral</button>
+                    <button class="sbr-btn" id="sbr-publish-btn" disabled>Försök publicera igen</button>
                     <ul class="sbr-result" id="sbr-publish-result"></ul>
                 </div>
             </div>
@@ -770,6 +779,7 @@
                     <div class="sbr-step-head"><span class="sbr-step-num">3</span><h3>Infoga på Bolagsinfo</h3></div>
                     <ul class="sbr-step-list">
                         <li>Läggs sist på sidan, under befintlig text</li>
+                        <li>Sammanfattningen publiceras även till Mistral-biblioteket, så kollegor kan fråga chatten om mötet</li>
                         <li>Klicka sedan <strong>Spara</strong> i WordPress</li>
                     </ul>
                     <button class="sbr-btn" id="sbr-bolag-insert" disabled>Infoga på Bolagsinfo</button>
@@ -1679,6 +1689,8 @@
                 setStep(3, 'active');
                 publishBtn.disabled = false;
                 setResult(publishResult, []);
+                // Publicera automatiskt – drag-and-drop ska räcka som enda handlig.
+                publishToMistral();
             } catch (e) {
                 logError('konvertering', e, { fil: file.name });
                 showConvertStatus(e.message, 'err');
@@ -1785,7 +1797,7 @@
             let r = step('Läser av biblioteket…');
             const existing = await listLibraryDocs();
             const oldOwn = existing.filter(d => OWN_DOC_RE.test(d.name || ''));
-            const others = existing.filter(d => !OWN_DOC_RE.test(d.name || ''));
+            const others = existing.filter(d => !OWN_DOC_RE.test(d.name || '') && !BOLAG_DOC_RE.test(d.name || ''));
             r.kind = 'ok'; r.text = 'Biblioteket har ' + existing.length + ' filer (' + oldOwn.length + ' ersätts)';
 
             for (const f of converted.files) {
@@ -2307,19 +2319,58 @@
         return true;
     }
 
-    bolagInsert.addEventListener('click', function () {
+    // Publicerar den granskade sammanfattningen som ett Markdown-dokument i
+    // Mistral-biblioteket, så att alla kollegor kan fråga chatten vad som
+    // skedde på senaste bolagsmötet. Äldre bolagsmötesdokument ersätts.
+    async function publishBolagSummary(html, date) {
+        if (!getActiveKey()) { await ensureKey(true); }
+        if (!getActiveKey()) throw new Error('Ingen API-nyckel tillgänglig.');
+        const md = html.replace(/<\/h[1-6]>\s*/gi, '\n\n')
+                       .replace(/<br\s*\/?>/gi, '\n')
+                       .replace(/<\/p>\s*/gi, '\n\n')
+                       .replace(/<li[^>]*>/gi, '- ')
+                       .replace(/<[^>]+>/g, '')
+                       .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+                       .replace(/&nbsp;/g, ' ').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+                       .replace(/\n{3,}/g, '\n\n').trim();
+        const name = 'sbr-' + toDateInput(date) + '-bolagsmote.md';
+        const doc = await uploadLibraryDoc(name, md);
+        if (!doc || !doc.id) throw new Error('Mistral returnerade inget dokument-ID.');
+        await waitUntilProcessed(doc.id);
+        const existing = await listLibraryDocs();
+        const oldBolag = existing.filter(d => BOLAG_DOC_RE.test(d.name || '') && d.id !== doc.id);
+        for (const d of oldBolag) {
+            await mistralRequest('DELETE', LIBRARY_API_URL + '/documents/' + encodeURIComponent(d.id));
+        }
+        try { sessionStorage.removeItem(UPDATED_CACHE_KEY); } catch (e) { /* ignorera */ }
+        refreshUpdatedTag();
+        return { name: name, removed: oldBolag.length };
+    }
+
+    bolagInsert.addEventListener('click', async function () {
         const html = finalBolagHtml();
+        bolagInsert.disabled = true;
+        setResult(bolagInsertRes, [{ kind: 'wait', text: 'Publicerar till biblioteket så kollegor kan fråga chatten…' }]);
+        let published = null;
+        try {
+            published = await publishBolagSummary(html, fromDateInput(bolagDate.value));
+        } catch (e) {
+            logError('bolagsmöte publicering', e, {});
+            setResult(bolagInsertRes, [{ kind: 'warn', text: 'Kunde inte publicera till biblioteket: ' + e.message }]);
+        }
         if (isBolagEditPage()) {
             const ok = insertIntoBolagsinfo(html);
-            setResult(bolagInsertRes, ok
-                ? [{ kind: 'ok', text: 'Infogat sist i texten. Granska och klicka Spara uppe till höger.' }]
-                : [{ kind: 'err', text: 'Hittade inte innehållsrutan på sidan.' }]);
+            const rows = [];
+            if (!ok) rows.push({ kind: 'err', text: 'Hittade inte innehållsrutan på sidan.' });
+            if (published) rows.push({ kind: 'ok', text: 'Biblioteket uppdaterat (' + published.name + (published.removed ? ', ersatte ' + published.removed + ' gammal' : '') + ') – kollegor kan nu fråga chatten om mötet.' });
+            setResult(bolagInsertRes, rows);
             if (ok) setBStep(3, 'done');
         } else {
             // Öppna Bolagsinfo; sammanfattningen infogas automatiskt där.
             GM_setValue(BOLAG_PENDING, JSON.stringify({ html: html, at: Date.now() }));
             location.href = BOLAG_EDIT_URL;
         }
+        bolagInsert.disabled = false;
     });
 
     // På Bolagsinfo: infoga en väntande sammanfattning när redigeraren är redo.
