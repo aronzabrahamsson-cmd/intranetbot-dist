@@ -1,13 +1,16 @@
 // ==UserScript==
 // @name         SBR Intranät-assistent (Mistral)
 // @namespace    https://sbr.wiki/
-// @version      1.26.0
+// @version      1.26.1
 // @description  Chattassistent för SBR:s intranät. Anropar en Mistral-agent (Document Library/RAG) och svarar på frågor om policys, förmåner och regler.
 // @author       Aron
 // @match        https://sbr.wiki/*
+// @match        https://www.sbr.wiki/*
 // @match        chrome://newtab/
 // @exclude      https://sbr.wiki/wp/wp-admin/*
 // @exclude      https://sbr.wiki/wp/wp-login.php*
+// @exclude      https://www.sbr.wiki/wp/wp-admin/*
+// @exclude      https://www.sbr.wiki/wp/wp-login.php*
 // @updateURL    https://raw.githubusercontent.com/aronzabrahamsson-cmd/intranetbot-dist/main/intranetbot.user.js
 // @downloadURL  https://raw.githubusercontent.com/aronzabrahamsson-cmd/intranetbot-dist/main/intranetbot.user.js
 // @grant        GM_xmlhttpRequest
@@ -290,7 +293,7 @@
     // Vänlig hänvisning till Mina kollegor i stället för ett gissat svar.
     function formatStaffReferral() {
         return 'Tyvärr kan jag inte svara på frågor om enskilda personer, men du hittar alla avdelningar och all personal här: ' +
-               '[Mina kollegor](https://sbr.wiki' + STAFF_PAGE_URL + ')';
+               '[Mina kollegor](' + location.origin + STAFF_PAGE_URL + ')';
     }
 
     // =========================================================================
@@ -715,7 +718,7 @@
                         <li>Öppna exportsidan</li>
                         <li>Välj <strong>Allt innehåll</strong> → <strong>Ladda ner exportfil</strong></li>
                     </ul>
-                    <a class="sbr-btn" id="sbr-export-link" href="https://sbr.wiki/wp/wp-admin/export.php" target="_blank" rel="noopener noreferrer">Öppna exportsidan ↗</a>
+                    <a class="sbr-btn" id="sbr-export-link" href="${location.origin}/wp/wp-admin/export.php" target="_blank" rel="noopener noreferrer">Öppna exportsidan ↗</a>
                 </div>
                 <div class="sbr-step-arrow">↓</div>
                 <div class="sbr-step active" id="sbr-step-2">
@@ -2009,7 +2012,7 @@
     // 3. Admin granskar och klickar "Infoga": texten läggs sist i innehållsrutan
     //    på Bolagsinfo (öppnas automatiskt om man står på en annan sida), och
     //    admin klickar Spara i WordPress.
-    const BOLAG_EDIT_URL   = 'https://sbr.wiki/bolagsinfo/post.php?post=109&action=edit';
+    const BOLAG_EDIT_URL   = location.origin + '/bolagsinfo/post.php?post=109&action=edit';
     const BOLAG_PENDING    = 'sbr_bolag_pending';
     const OCR_MODEL        = 'mistral-ocr-latest';
     const SUMMARY_MODEL    = 'mistral-medium-latest';
